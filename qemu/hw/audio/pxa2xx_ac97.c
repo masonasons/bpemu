@@ -93,6 +93,8 @@
 #define AC97_POWERDOWN          0x26
 #define AC97_EXTENDED_STATUS    0x2a
 #define AC97_PCM_FRONT_DAC_RATE 0x2c
+/* wm9713_aux_hw_params() programs the Aux DAC rate here. */
+#define AC97_PCM_SURR_DAC_RATE  0x2e
 #define AC97_PCM_LR_ADC_RATE    0x32
 #define AC97_VENDOR_ID1         0x7c
 #define AC97_VENDOR_ID2         0x7e
@@ -151,7 +153,28 @@ struct PXA2xxAC97State {
     uint32_t fifo_level;    /* frames currently queued */
     bool drained_last_cb;
 
+    /*
+     * The WM9713 has a second, mono DAC -- the "Aux" DAC -- which ALSA exposes
+     * as a separate PCM device and Linux feeds through MODR on DMA request 10.
+     * The Braille+ speaks through it: Eloquence synthesises mono, and the
+     * shell plays it on the Aux device while GStreamer sound effects go to the
+     * stereo HiFi DAC. Dropping MODR therefore loses all speech while leaving
+     * every other sound working, which is exactly how this presented.
+     */
+    SWVoiceOut *aux_voice;
+    uint32_t aux_freq;
+    bool aux_active;
+    int16_t aux_fifo[FIFO_FRAMES];
+    uint32_t aux_head;
+    uint32_t aux_tail;
+    uint32_t aux_level;     /* mono samples currently queued */
+    bool aux_drained_last_cb;
+    qemu_irq aux_tx_dma;    /* DRCMR(10) */
+    uint64_t aux_pushed;    /* debug: samples pushed this burst */
+    uint64_t pcm_pushed;    /* debug: frames pushed this burst */
+
     QEMUTimer *dma_refresh;
+    bool debug;             /* BPEMU_AC97_DEBUG: report burst sizes */
 };
 
 /*
@@ -217,7 +240,11 @@ static void pxa2xx_ac97_update_dma(PXA2xxAC97State *s)
     bool want_tx = link_up &&
                    (FIFO_FRAMES - s->fifo_level) >= FIFO_REFILL_THRESHOLD;
 
+    bool want_aux = link_up &&
+                    (FIFO_FRAMES - s->aux_level) >= FIFO_REFILL_THRESHOLD;
+
     qemu_set_irq(s->tx_dma, want_tx);
+    qemu_set_irq(s->aux_tx_dma, want_aux);
     /* Capture is silence-only; never ask the DMA engine for input frames. */
     qemu_set_irq(s->rx_dma, 0);
 
@@ -246,7 +273,44 @@ static uint32_t pxa2xx_ac97_playback_freq(PXA2xxAC97State *s)
     return freq;
 }
 
+static uint32_t pxa2xx_ac97_aux_freq(PXA2xxAC97State *s)
+{
+    uint32_t freq = s->codec[AC97_PCM_SURR_DAC_RATE >> 1];
+
+    /*
+     * Fall back to the front DAC rate if the Aux rate has not been programmed.
+     * Eloquence synthesises at 11025Hz, so this is rarely the same as the HiFi
+     * stream's rate and the two need separate voices.
+     */
+    if (freq < 4000 || freq > 48000) {
+        freq = pxa2xx_ac97_playback_freq(s);
+    }
+    return freq;
+}
+
 static void pxa2xx_ac97_out_cb(void *opaque, int free_bytes);
+static void pxa2xx_ac97_aux_cb(void *opaque, int free_bytes);
+
+static void pxa2xx_ac97_open_aux_voice(PXA2xxAC97State *s)
+{
+    struct audsettings as = {
+        .freq = pxa2xx_ac97_aux_freq(s),
+        .nchannels = 1,
+        .fmt = AUDIO_FORMAT_S16,
+        .endianness = 0,
+    };
+
+    s->aux_freq = as.freq;
+    s->aux_voice = AUD_open_out(&s->card, s->aux_voice, "pxa2xx-ac97.aux",
+                                s, pxa2xx_ac97_aux_cb, &as);
+    if (s->debug) {
+        fprintf(stderr, "[ac97] aux voice opened at %u Hz (surr=0x%04x "
+                "front=0x%04x extstat=0x%04x)\n", as.freq,
+                s->codec[AC97_PCM_SURR_DAC_RATE >> 1],
+                s->codec[AC97_PCM_FRONT_DAC_RATE >> 1],
+                s->codec[AC97_EXTENDED_STATUS >> 1]);
+    }
+}
 
 static void pxa2xx_ac97_open_voice(PXA2xxAC97State *s)
 {
@@ -304,6 +368,12 @@ static void pxa2xx_ac97_out_cb(void *opaque, int free_bytes)
         if (s->drained_last_cb && s->voice_active) {
             AUD_set_active_out(s->voice, 0);
             s->voice_active = false;
+            if (s->debug) {
+                fprintf(stderr, "[ac97] PCM burst: %llu frames at %u Hz = "
+                        "%.2f s\n", (unsigned long long)s->pcm_pushed,
+                        s->freq, (double)s->pcm_pushed / s->freq);
+            }
+            s->pcm_pushed = 0;
         }
         s->drained_last_cb = true;
     } else {
@@ -311,6 +381,70 @@ static void pxa2xx_ac97_out_cb(void *opaque, int free_bytes)
     }
 
     pxa2xx_ac97_update_dma(s);
+}
+
+static void pxa2xx_ac97_aux_cb(void *opaque, int free_bytes)
+{
+    PXA2xxAC97State *s = opaque;
+    uint32_t max_bytes = free_bytes;
+
+    if (!s->aux_voice) {
+        return;
+    }
+
+    while (s->aux_level && max_bytes >= sizeof(int16_t)) {
+        uint32_t contig = MIN(s->aux_level, FIFO_FRAMES - s->aux_tail);
+        uint32_t want = MIN(contig * sizeof(int16_t), max_bytes);
+        size_t written = AUD_write(s->aux_voice, &s->aux_fifo[s->aux_tail],
+                                   want);
+        uint32_t samples = written / sizeof(int16_t);
+
+        if (!samples) {
+            break;
+        }
+        s->aux_tail = (s->aux_tail + samples) % FIFO_FRAMES;
+        s->aux_level -= samples;
+        max_bytes -= samples * sizeof(int16_t);
+    }
+
+    if (!s->aux_level) {
+        if (s->aux_drained_last_cb && s->aux_active) {
+            AUD_set_active_out(s->aux_voice, 0);
+            s->aux_active = false;
+            if (s->debug) {
+                fprintf(stderr, "[ac97] AUX burst: %llu samples at %u Hz = "
+                        "%.2f s\n", (unsigned long long)s->aux_pushed,
+                        s->aux_freq, (double)s->aux_pushed / s->aux_freq);
+            }
+            s->aux_pushed = 0;
+        }
+        s->aux_drained_last_cb = true;
+    } else {
+        s->aux_drained_last_cb = false;
+    }
+
+    pxa2xx_ac97_update_dma(s);
+}
+
+static void pxa2xx_ac97_push_aux_sample(PXA2xxAC97State *s, int16_t sample)
+{
+    if (s->aux_level == FIFO_FRAMES) {
+        s->aux_tail = (s->aux_tail + 1) % FIFO_FRAMES;
+        s->aux_level--;
+        s->mosr |= 1 << 4;
+    }
+
+    s->aux_fifo[s->aux_head] = sample;
+    s->aux_head = (s->aux_head + 1) % FIFO_FRAMES;
+    s->aux_level++;
+    s->aux_drained_last_cb = false;
+
+    s->aux_pushed++;
+
+    if (s->aux_voice && !s->aux_active) {
+        AUD_set_active_out(s->aux_voice, 1);
+        s->aux_active = true;
+    }
 }
 
 static void pxa2xx_ac97_push_frame(PXA2xxAC97State *s, uint32_t frame)
@@ -326,6 +460,7 @@ static void pxa2xx_ac97_push_frame(PXA2xxAC97State *s, uint32_t frame)
     s->fifo_head = (s->fifo_head + 1) % FIFO_FRAMES;
     s->fifo_level++;
     s->drained_last_cb = false;
+    s->pcm_pushed++;
 
     if (s->voice && !s->voice_active) {
         AUD_set_active_out(s->voice, 1);
@@ -372,6 +507,14 @@ static void pxa2xx_ac97_codec_write(PXA2xxAC97State *s, unsigned reg,
         pxa2xx_ac97_open_voice(s);
         if (s->voice_active) {
             AUD_set_active_out(s->voice, 1);
+        }
+    }
+
+    if ((reg << 1) == AC97_PCM_SURR_DAC_RATE &&
+        pxa2xx_ac97_aux_freq(s) != s->aux_freq) {
+        pxa2xx_ac97_open_aux_voice(s);
+        if (s->aux_active) {
+            AUD_set_active_out(s->aux_voice, 1);
         }
     }
 }
@@ -511,9 +654,19 @@ static void pxa2xx_ac97_write(void *opaque, hwaddr addr, uint64_t value,
         pxa2xx_ac97_push_frame(s, value);
         pxa2xx_ac97_update_dma(s);
         break;
-    case MCDR:
     case MODR:
-        break;              /* modem/mic output is not wired anywhere */
+        /*
+         * One mono sample per write, in the low half; the upper half is
+         * padding. It is tempting to read a 32-bit write as two packed S16
+         * samples, since the DMA is configured DCMD_WIDTH4 over what looks
+         * like a linear mono buffer -- but that doubles the stream. Measured:
+         * a 3.03s clip arrives as ~147k writes, matching one sample each.
+         */
+        pxa2xx_ac97_push_aux_sample(s, (int16_t)(value & 0xffff));
+        pxa2xx_ac97_update_dma(s);
+        break;
+    case MCDR:
+        break;              /* microphone input is not wired anywhere */
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: bad write offset 0x%" HWADDR_PRIx "\n",
@@ -542,11 +695,17 @@ static void pxa2xx_ac97_reset_hold(Object *obj, ResetType type)
     s->mocr = s->micr = s->mosr = s->misr = 0;
     s->fifo_head = s->fifo_tail = s->fifo_level = 0;
     s->drained_last_cb = true;
+    s->aux_head = s->aux_tail = s->aux_level = 0;
+    s->aux_drained_last_cb = true;
     memcpy(s->codec, wm9713_default_regs, sizeof(s->codec));
 
     if (s->voice && s->voice_active) {
         AUD_set_active_out(s->voice, 0);
         s->voice_active = false;
+    }
+    if (s->aux_voice && s->aux_active) {
+        AUD_set_active_out(s->aux_voice, 0);
+        s->aux_active = false;
     }
     if (s->dma_refresh) {
         timer_del(s->dma_refresh);
@@ -554,6 +713,7 @@ static void pxa2xx_ac97_reset_hold(Object *obj, ResetType type)
 
     qemu_set_irq(s->irq, 0);
     qemu_set_irq(s->tx_dma, 0);
+    qemu_set_irq(s->aux_tx_dma, 0);
     qemu_set_irq(s->rx_dma, 0);
 }
 
@@ -566,6 +726,7 @@ static void pxa2xx_ac97_realize(DeviceState *dev, Error **errp)
         return;
     }
 
+    s->debug = getenv("BPEMU_AC97_DEBUG") != NULL;
     s->dma_refresh = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                   pxa2xx_ac97_dma_refresh, s);
 
@@ -577,11 +738,19 @@ static void pxa2xx_ac97_realize(DeviceState *dev, Error **errp)
     }
     AUD_set_volume_out(s->voice, 0, 255, 255);
 
+    pxa2xx_ac97_open_aux_voice(s);
+    if (!s->aux_voice) {
+        error_setg(errp, "could not open the host audio output for the Aux DAC");
+        return;
+    }
+    AUD_set_volume_out(s->aux_voice, 0, 255, 255);
+
     memory_region_init_io(&s->iomem, OBJECT(s), &pxa2xx_ac97_ops, s,
                           "pxa2xx-ac97", 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(dev, &s->tx_dma, "tx-dma", 1);
+    qdev_init_gpio_out_named(dev, &s->aux_tx_dma, "aux-tx-dma", 1);
     qdev_init_gpio_out_named(dev, &s->rx_dma, "rx-dma", 1);
 }
 
@@ -594,6 +763,7 @@ static void pxa2xx_ac97_unrealize(DeviceState *dev)
         s->dma_refresh = NULL;
     }
     AUD_close_out(&s->card, s->voice);
+    AUD_close_out(&s->card, s->aux_voice);
     AUD_remove_card(&s->card);
 }
 
@@ -609,6 +779,9 @@ static int pxa2xx_ac97_post_load(void *opaque, int version_id)
     pxa2xx_ac97_update_dma(s);
     if (s->voice) {
         AUD_set_active_out(s->voice, s->voice_active);
+    }
+    if (s->aux_voice) {
+        AUD_set_active_out(s->aux_voice, s->aux_active);
     }
     return 0;
 }
@@ -637,6 +810,11 @@ static const VMStateDescription vmstate_pxa2xx_ac97 = {
         VMSTATE_UINT32(fifo_tail, PXA2xxAC97State),
         VMSTATE_UINT32(fifo_level, PXA2xxAC97State),
         VMSTATE_BOOL(voice_active, PXA2xxAC97State),
+        VMSTATE_INT16_ARRAY(aux_fifo, PXA2xxAC97State, FIFO_FRAMES),
+        VMSTATE_UINT32(aux_head, PXA2xxAC97State),
+        VMSTATE_UINT32(aux_tail, PXA2xxAC97State),
+        VMSTATE_UINT32(aux_level, PXA2xxAC97State),
+        VMSTATE_BOOL(aux_active, PXA2xxAC97State),
         VMSTATE_TIMER_PTR(dma_refresh, PXA2xxAC97State),
         VMSTATE_END_OF_LIST()
     }

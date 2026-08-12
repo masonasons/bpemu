@@ -398,6 +398,10 @@ static void everest_init(MachineState *machine)
     qdev_connect_gpio_out_named(ac97, "rx-dma", 0,
                                 qdev_get_gpio_in(mpu->dma,
                                                  PXA2XX_RX_RQ_AC97_PCM));
+    /* The WM9713's mono Aux DAC, which is what the firmware speaks through. */
+    qdev_connect_gpio_out_named(ac97, "aux-tx-dma", 0,
+                                qdev_get_gpio_in(mpu->dma,
+                                                 PXA2XX_TX_RQ_AC97_AUX));
 
     /* OneNAND boot flash on nCS0. */
     onenand = qdev_new("onenand");

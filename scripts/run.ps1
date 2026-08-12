@@ -46,10 +46,16 @@ foreach ($f in @($Qemu, $Kernel, $Flash)) {
     if (-not (Test-Path $f)) { throw "missing: $f" }
 }
 
-# The drive is attached only if you have already created one. It is NOT created
-# automatically yet: the IDE interrupt is not being delivered, so the guest logs
-# "hda: lost interrupt" and `insmod pxa2xx-ide` wedges inside /etc/StartShell,
-# which stops the launcher and shell starting at all.
+# The firmware mounts /dev/hda1 on /media/hdd, and without a drive its sysmon
+# applet dies in setup() and is restarted forever, so the user interface never
+# comes up and never speaks. Create the drive on demand; qcow2 keeps a 60GB
+# disk down to a couple of hundred KB until the guest writes to it.
+if (-not (Test-Path $Hdd)) {
+    Write-Host "Creating the internal 60GB drive at $Hdd" -ForegroundColor Cyan
+    & python (Join-Path $repo 'tools\bpimage.py') mkdisk $Hdd
+    if ($LASTEXITCODE -ne 0) { throw "could not create $Hdd" }
+    Write-Host "It is blank, so the device will offer to format it on first boot." -ForegroundColor Cyan
+}
 
 # Keep this in step with tools/bpimage.py's PARTITIONS.
 $mtdparts = 'mtdparts=onenand:1024k(bootloader),1024k(params),4096k(kernel),-(root)'
@@ -61,13 +67,11 @@ $qemuArgs = @(
     '-kernel', $Kernel
     '-append', $append
     '-drive', "if=mtd,format=raw,file=$Flash"
+    '-drive', "if=ide,index=0,format=qcow2,file=$Hdd"
     '-audio', $AudioDrv
     '-serial', 'mon:stdio'
     '-display', $Display
 )
-if (Test-Path $Hdd) {
-    $qemuArgs += @('-drive', "if=ide,index=0,format=qcow2,file=$Hdd")
-}
 if ($ExtraArgs) { $qemuArgs += $ExtraArgs }
 
 & $Qemu @qemuArgs

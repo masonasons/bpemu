@@ -182,6 +182,10 @@ def main():
                          "ordering with -c is preserved")
     ap.add_argument("-m", "--mon", action=OrderedStep,
                     help="QEMU monitor command to run, e.g. 'xp/1xw 0x40e00038'")
+    ap.add_argument("--push", action="append", default=[], metavar="LOCAL:REMOTE",
+                    help="copy a local file into the guest before running "
+                         "commands, typed over the console as a heredoc. Far "
+                         "easier than fighting three layers of shell quoting.")
     ap.add_argument("--key-hold-ms", type=int, default=800,
                     help="how long to hold each injected key (default 800). "
                          "QEMU's default of 100ms is often too short for a "
@@ -224,6 +228,23 @@ def main():
         print("logged in", flush=True)
 
         mon = Monitor(monitor_path) if monitor_path else None
+
+        for spec in args.push:
+            local, _, remote = spec.rpartition(":")
+            if not local:
+                raise RuntimeError("--push wants LOCAL:REMOTE, got %r" % spec)
+            with open(local, "r") as f:
+                body = f.read().rstrip("\n")
+            print("> pushing %s -> %s (%d bytes)" % (local, remote, len(body)),
+                  flush=True)
+            # A quoted heredoc delimiter stops the guest shell expanding
+            # anything in the payload.
+            con.send("cat > %s <<'__BPEMU_EOF__'" % remote)
+            for line in body.split("\n"):
+                con.send(line)
+            con.send("__BPEMU_EOF__")
+            con.send("echo __BPEMU_DONE_$?__")
+            con.expect(re.compile(rb"__BPEMU_DONE_(\d+)__"), args.cmd_timeout)
 
         for kind, value in steps:
             if kind == "mon":
