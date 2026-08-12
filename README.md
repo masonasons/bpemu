@@ -39,7 +39,8 @@ run as they were flashed.
 | Audio output (AC97 + WM9713) | ✅ new device models |
 | Python application launcher starts | ✅ |
 | Serial console, networking, SSH, Samba, Bluetooth stack | ✅ as far as the firmware takes them |
-| Keypad input into the application | ❌ see [Limitations](#limitations) |
+| Native Windows build (no WSL) | ✅ self-contained `qemu-system-arm.exe` |
+| Keypad matrix recovered and wired | ⚠️ interrupts reach the guest, events do not |
 | Battery, vibration motor | ❌ drivers load, hardware unmodelled |
 | Audio capture | ❌ reads silence |
 
@@ -203,11 +204,13 @@ deliberate and is the main long-term maintenance risk for this project.
 
 The honest ones, in rough order of how much they matter:
 
-- **You cannot yet drive the UI.** The application takes input from the Linux
-  console keyboard, fed by the Everest keypad driver. That driver appears to use
-  the PXA27x keypad controller, which QEMU *already* models — so the missing
-  piece is just the matrix keymap, not a new device. Until then the serial
-  console gets you a shell, not the app.
+- **You cannot yet drive the UI.** The keypad matrix *is* recovered and wired
+  up (a 6×8 auto-scanned PXA27x matrix; see the docs for the full table), and
+  injected keys demonstrably reach the guest — the keypad interrupt count rises
+  by exactly two per keypress. But nothing arrives at `/dev/input/event0` yet,
+  so the serial console still gets you a shell rather than the app. The docs
+  record exactly how far the signal gets, and which hypothesis was tested and
+  ruled out.
 - **RAM size, flash capacity and partition sizes are informed assumptions.**
   They come from a bootloader we cannot read. Partition *ordering* is attested
   by the firmware itself. See the docs for the derivations.

@@ -202,30 +202,46 @@ Everest IDE interface at 0xc48e0000  irq:155
   which the driver detects by testing bit `0x200` and routes separately — these
   are the braille dots, i.e. chorded braille entry on the twelve-key pad.
 
-### The keypad needs auto-scan rescans, which QEMU does not model
+### Input still does not reach userspace — where it stops
 
-Wiring the matrix up via `pxa27x_register_keypad()` is necessary but not
-sufficient. Injected keys reach the guest — `/proc/interrupts` shows the
-`Keypad` count climbing by exactly two per keypress — yet nothing arrives at
-`/dev/input/event0`.
+Wiring the matrix up via `pxa27x_register_keypad()` is necessary but **not
+sufficient**, and this is the main outstanding gap.
 
-The reason is in the driver's interrupt handler at `0xc01e3ad8`. It reads
-`KPC (0x00)`, `KPAS (0x20)` and `KPASMKP0..3 (0x28/0x30/0x38/0x40)` — exactly
-the registers QEMU models — XORs them against the previously saved state, and
-hands each changed column pair to a per-key state machine at `0xc01e3700`. That
-state machine is a **software debounce keyed on `jiffies`**: a key is only
-accepted once it has been observed still pressed on a *later* scan.
+What is established:
 
-Real PXA27x hardware in automatic-scan mode (`KPC_AS` / `KPC_ASACT`, both set
-by this driver) keeps re-interrupting for as long as any key is down, so the
-second observation always arrives. QEMU's model raises the interrupt only when
-the matrix state *changes*, so the state machine never advances past its first
-sighting and no key is ever reported.
+- Injected keys reach the guest. `/proc/interrupts` shows the `Keypad` count on
+  IRQ 4 climbing by exactly **two per keypress** (press and release), from 0 to
+  10 over five keys, and 42 over twenty-one keys.
+- The driver's interrupt handler at `0xc01e3ad8` reads `KPC (0x00)`,
+  `KPAS (0x20)` and `KPASMKP0..3 (0x28/0x30/0x38/0x40)` — precisely the
+  registers and offsets QEMU models — and XORs each against a saved copy at
+  `dev+0x98..0xa4` to find changed bits, dispatching changed column pairs via
+  `0xc01e3a94` (which splits the low byte and bits 16..23 into two columns,
+  matching QEMU's `1 << (row + 16 * (col % 2))` layout).
+- Nothing arrives at `/dev/input/event0`, for any of the twenty-one distinct
+  matrix positions tried.
 
-`scripts/setup.sh` therefore patches `hw/input/pxa2xx_keypad.c` to add the
-periodic rescan that auto-scan mode implies: while any key is held and
-`KPC_ME` plus `KPC_AS`/`KPC_ASACT` are set, the model re-raises the matrix
-interrupt every 10 ms.
+So the failure is downstream of the register read, inside the per-key path
+around `0xc01e3700`, which consults `jiffies` (`0xc03d88fc`) against saved
+timestamps and a threshold (`0xc040e97c`, `0xc03f2c58`) and keeps per-key state
+at `dev + 0xa8 + index*4`. That looks like a software debounce, which suggested
+that the driver needs to see a key still pressed on a *later* scan — real
+PXA27x auto-scan hardware re-interrupts continuously while a key is down,
+whereas QEMU's model only fires on state changes.
+
+**That hypothesis was tested and rejected.** Patching
+`hw/input/pxa2xx_keypad.c` to re-raise the matrix interrupt every 10 ms while a
+key is held drove the interrupt count to 183 for three keys — the rescans were
+clearly happening — and still produced no input events. The patch was reverted
+rather than shipped: it changes behaviour for every other PXA board in QEMU
+(mainstone, spitz, z2, tosa) and bought nothing here.
+
+Next things worth trying: decode the per-key path properly (note `0xc01e3700`
+is mid-function, not an entry point, so its prologue and real arguments are
+still unknown); check whether the driver expects `KPAS` fields QEMU leaves
+constant, in particular the row/column fields that QEMU only fills when exactly
+one key is pressed; and check `KPKDI`, the key-debounce-interval register,
+which QEMU stores but never acts on.
 
   Above the driver, `/etc/StartShell` loads `/etc/everest.keymap.gz` with
   `loadkeys`, so the Perkins-style keys reach the application as ordinary Linux
