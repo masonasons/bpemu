@@ -597,10 +597,27 @@ static void pxa2xx_ac97_unrealize(DeviceState *dev)
     AUD_remove_card(&s->card);
 }
 
+static int pxa2xx_ac97_post_load(void *opaque, int version_id)
+{
+    PXA2xxAC97State *s = opaque;
+
+    /*
+     * Snapshots are the whole point of this machine for anyone who does not
+     * want to sit through a TCG boot, so make sure a restored state resumes
+     * presenting the DMA request rather than going quiet.
+     */
+    pxa2xx_ac97_update_dma(s);
+    if (s->voice) {
+        AUD_set_active_out(s->voice, s->voice_active);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_pxa2xx_ac97 = {
     .name = "pxa2xx-ac97",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = pxa2xx_ac97_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(gcr, PXA2xxAC97State),
         VMSTATE_UINT32(gsr, PXA2xxAC97State),
@@ -619,6 +636,8 @@ static const VMStateDescription vmstate_pxa2xx_ac97 = {
         VMSTATE_UINT32(fifo_head, PXA2xxAC97State),
         VMSTATE_UINT32(fifo_tail, PXA2xxAC97State),
         VMSTATE_UINT32(fifo_level, PXA2xxAC97State),
+        VMSTATE_BOOL(voice_active, PXA2xxAC97State),
+        VMSTATE_TIMER_PTR(dma_refresh, PXA2xxAC97State),
         VMSTATE_END_OF_LIST()
     }
 };

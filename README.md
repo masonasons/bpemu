@@ -34,7 +34,7 @@ run as they were flashed.
 
 | | Status |
 |---|---|
-| Boot to userspace and a login shell | ✅ ~45 s under TCG |
+| Boot to userspace and a login shell | ✅ ~45 s under TCG once configured |
 | OneNAND boot flash, 4 MTD partitions, JFFS2 root read-write | ✅ |
 | Audio output (AC97 + WM9713) | ✅ new device models |
 | Python application launcher starts | ✅ |
@@ -71,6 +71,13 @@ repo does not redistribute one.
 
 `setup.sh` is safe to re-run; it re-applies the board sources and rebuilds.
 Log in as `root` (no password).
+
+**The first boot of a freshly built image is slow** — several minutes, because
+the firmware runs its one-time `ipkg-cl configure` pass, rebuilds the MIME
+database and generates SSH host keys. That state is written back to the JFFS2
+root, so later boots of the same `flash.img` reach a login prompt in well under
+a minute. Keep the image around rather than rebuilding it each time, and use
+QEMU snapshots (`savevm`/`loadvm` from the monitor) to skip the boot entirely.
 
 To boot without audio, or with a different backend:
 

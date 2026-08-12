@@ -25,6 +25,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "sysemu/blockdev.h"
+#include "sysemu/reset.h"
 #include "exec/address-spaces.h"
 
 /*
@@ -97,6 +98,19 @@ static struct arm_boot_info everest_binfo = {
     .loader_start = PXA2XX_SDRAM_BASE,
 };
 
+/*
+ * The straps are hardwired pin levels, so they have to be re-presented on every
+ * system reset. QEMU's pxa2xx-gpio happens not to implement reset today, which
+ * would let the initial values survive on their own, but relying on that would
+ * make a guest-initiated reboot silently read board_id as 0 the day it grows
+ * one.
+ */
+typedef struct EverestStraps {
+    DeviceState *gpio;
+    uint32_t board_id;
+    uint32_t keypad_id;
+} EverestStraps;
+
 /* Drive a strap value out over a run of consecutive GPIO input lines. */
 static void everest_strap(DeviceState *gpio, int first_gpio,
                           uint32_t value, int nbits)
@@ -109,6 +123,19 @@ static void everest_strap(DeviceState *gpio, int first_gpio,
     }
 }
 
+static void everest_straps_reset(void *opaque)
+{
+    EverestStraps *st = opaque;
+
+    everest_strap(st->gpio, EVEREST_GPIO_BOARD_ID_BASE, st->board_id, 4);
+    everest_strap(st->gpio, EVEREST_GPIO_KEYPAD_ID_BASE, st->keypad_id, 2);
+    qemu_set_irq(qdev_get_gpio_in(st->gpio, EVEREST_GPIO_KEYPAD_ID_BIT3),
+                 (st->keypad_id >> 3) & 1);
+
+    /* No SD card in the slot (active low detect, so drive it high). */
+    qemu_set_irq(qdev_get_gpio_in(st->gpio, EVEREST_GPIO_SD_CARD_DETECT), 1);
+}
+
 static void everest_init(MachineState *machine)
 {
     EverestMachineState *ems = EVEREST_MACHINE(machine);
@@ -116,6 +143,7 @@ static void everest_init(MachineState *machine)
     DeviceState *onenand;
     DeviceState *ac97;
     DriveInfo *dinfo;
+    EverestStraps *straps;
 
     mpu = pxa270_init(machine->ram_size, machine->cpu_type);
 
@@ -154,14 +182,13 @@ static void everest_init(MachineState *machine)
     sysbus_connect_irq(SYS_BUS_DEVICE(onenand), 0,
                        qdev_get_gpio_in(mpu->gpio, EVEREST_ONENAND_GPIO));
 
-    /* Board straps read by everest_init() out of GPLR3. */
-    everest_strap(mpu->gpio, EVEREST_GPIO_BOARD_ID_BASE, ems->board_id, 4);
-    everest_strap(mpu->gpio, EVEREST_GPIO_KEYPAD_ID_BASE, ems->keypad_id, 2);
-    qemu_set_irq(qdev_get_gpio_in(mpu->gpio, EVEREST_GPIO_KEYPAD_ID_BIT3),
-                 (ems->keypad_id >> 3) & 1);
-
-    /* No SD card in the slot (active low detect, so drive it high). */
-    qemu_set_irq(qdev_get_gpio_in(mpu->gpio, EVEREST_GPIO_SD_CARD_DETECT), 1);
+    /* Board straps read by everest_init() out of GPLR3, plus SD card detect. */
+    straps = g_new0(EverestStraps, 1);
+    straps->gpio = mpu->gpio;
+    straps->board_id = ems->board_id;
+    straps->keypad_id = ems->keypad_id;
+    qemu_register_reset(everest_straps_reset, straps);
+    everest_straps_reset(straps);
 
     everest_binfo.ram_size = machine->ram_size;
     everest_binfo.board_id = EVEREST_BOARD_ID;
