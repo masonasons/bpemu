@@ -16,9 +16,10 @@ import os
 import pty
 import re
 import select
-import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 DEFAULT_QEMU = os.path.expanduser("~/qemu/build/qemu-system-arm")
@@ -84,6 +85,62 @@ class Console:
             self.log.close()
 
 
+class Monitor:
+    """QEMU human monitor over a unix socket, used to inject key presses."""
+
+    def __init__(self, path, timeout=60):
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.connect(path)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.2)
+        self.sock.settimeout(5)
+        self._drain()
+
+    def _drain(self):
+        out = b""
+        try:
+            while True:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    break
+                out += chunk
+        except (socket.timeout, BlockingIOError):
+            pass
+        return out
+
+    def sendkey(self, key, hold_ms=None):
+        cmd = "sendkey %s" % key
+        if hold_ms:
+            cmd += " %d" % hold_ms
+        self.sock.sendall(cmd.encode() + b"\n")
+        time.sleep(0.4)
+        reply = self._drain().decode("utf-8", "replace")
+        # The monitor echoes the command and prints a prompt; anything else is
+        # an error worth surfacing rather than silently swallowing.
+        noise = [ln.strip() for ln in reply.replace("\r", "").split("\n")]
+        errs = [ln for ln in noise
+                if ln and cmd not in ln and not ln.startswith("(qemu)")]
+        return " | ".join(errs)
+
+
+class OrderedStep(argparse.Action):
+    """Collect -c/-k into one list so their relative order is preserved."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        steps = getattr(namespace, "steps", None)
+        if steps is None:
+            steps = []
+            setattr(namespace, "steps", steps)
+        kind = "key" if option_string in ("-k", "--key") else "cmd"
+        steps.append((kind, values))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--qemu", default=DEFAULT_QEMU)
@@ -97,9 +154,21 @@ def main():
     ap.add_argument("--log", default=None, help="write raw console output here")
     ap.add_argument("--boot-timeout", type=float, default=1800)
     ap.add_argument("--cmd-timeout", type=float, default=300)
-    ap.add_argument("-c", "--command", action="append", default=[],
+    ap.add_argument("-c", "--command", action=OrderedStep,
                     help="shell command to run after login (repeatable)")
+    ap.add_argument("-k", "--key", action=OrderedStep,
+                    help="QEMU sendkey name to inject, e.g. kp_1 (repeatable); "
+                         "ordering with -c is preserved")
+    ap.add_argument("--key-hold-ms", type=int, default=800,
+                    help="how long to hold each injected key (default 800). "
+                         "QEMU's default of 100ms is often too short for a "
+                         "TCG guest to debounce and sample the matrix.")
     args = ap.parse_args()
+    steps = getattr(args, "steps", None) or []
+
+    monitor_path = None
+    if any(kind == "key" for kind, _ in steps):
+        monitor_path = os.path.join(tempfile.mkdtemp(prefix="bpemu-"), "mon")
 
     argv = [
         args.qemu,
@@ -111,8 +180,11 @@ def main():
         "-audio", args.audio,
         "-serial", "stdio",
         "-display", "none",
-        "-monitor", "none",
     ]
+    if monitor_path:
+        argv += ["-monitor", "unix:%s,server,nowait" % monitor_path]
+    else:
+        argv += ["-monitor", "none"]
 
     con = Console(argv, args.log)
     started = time.monotonic()
@@ -126,11 +198,23 @@ def main():
         con.expect(PROMPT_RE, args.cmd_timeout)
         print("logged in", flush=True)
 
-        for cmd in args.command:
-            print("+ %s" % cmd, flush=True)
+        mon = Monitor(monitor_path) if monitor_path else None
+
+        for kind, value in steps:
+            if kind == "key":
+                err = mon.sendkey(value, args.key_hold_ms)
+                print("* sendkey %s%s" % (value, "  -> %s" % err if err else ""),
+                      flush=True)
+                if err:
+                    rc = 1
+                continue
+            print("+ %s" % value, flush=True)
             # A sentinel makes the end of each command unambiguous even when
             # the kernel interleaves its own printks with the shell output.
-            con.send("%s ; echo __BPEMU_DONE_$?__" % cmd)
+            # It goes on its own line rather than after a ';' so that commands
+            # ending in '&' stay valid shell.
+            con.send(value)
+            con.send("echo __BPEMU_DONE_$?__")
             out = con.expect(re.compile(rb"__BPEMU_DONE_(\d+)__"),
                              args.cmd_timeout)
             status = int(re.search(rb"(\d+)", out).group(1))

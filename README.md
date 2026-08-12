@@ -49,7 +49,8 @@ that is the difference between an emulator and a curiosity.
 
 ## Requirements
 
-Linux, or Windows with WSL2. You need a C toolchain and QEMU's build
+Linux, or Windows — either natively (see [below](#running-natively-on-windows))
+or through WSL2. For Linux/WSL you need a C toolchain and QEMU's build
 dependencies:
 
 ```bash
@@ -91,6 +92,52 @@ To capture what the device says to a file instead of your speakers:
 ```bash
 AUDIO_DRV='driver=wav,path=/tmp/braille.wav' ./scripts/run.sh
 ```
+
+## Running natively on Windows
+
+No WSL needed. The build uses MSYS2's MinGW-w64 toolchain and produces a plain
+`qemu-system-arm.exe` that plays audio through Windows directly.
+
+```powershell
+scoop install msys2          # or install from msys2.org
+.\scripts\setup-windows.ps1  # installs deps, builds, bundles runtime DLLs
+python tools\bpimage.py unpack C:\path\to\2.2.53.lsi build\parts
+python tools\bpimage.py mkflash build\parts build\flash.img
+.\scripts\run.ps1
+```
+
+`setup-windows.ps1` copies the MinGW runtime DLLs next to the binary, so the
+build directory is self-contained and can be moved.
+
+### Audio backends on Windows
+
+QEMU has **no WASAPI backend** — its audio drivers are alsa, dbus, dsound, jack,
+oss, pa, pipewire, sdl, sndio and wav. Both Windows options reach WASAPI anyway:
+
+| `-AudioDrv` | Path | Notes |
+|---|---|---|
+| `dsound` (default) | DirectSound, which Windows implements over WASAPI in user mode | Most battle-tested in QEMU |
+| `sdl` | SDL2, whose Windows audio backend *is* WASAPI | Direct, usually lower latency |
+
+```powershell
+.\scripts\run.ps1 -AudioDrv sdl
+.\scripts\run.ps1 -AudioDrv 'driver=wav,path=C:\out.wav'
+```
+
+### Two Windows-specific build fixes
+
+`scripts/setup.sh` applies these automatically; they are called out because they
+patch the QEMU tree:
+
+- **Symlinks.** QEMU's configure builds a `qemu-bundle` view of the install tree
+  out of symlinks, which Windows refuses without Developer Mode or Administrator
+  rights — and the failure aborts `meson setup` entirely. Upstream's answer is to
+  enable Developer Mode. Rather than require that, the setup script teaches the
+  step to copy instead, skipping entries whose targets are build outputs that do
+  not exist yet at configure time (a symlink may dangle; a copy may not).
+- **Tests.** QEMU 9.1's test binaries do not link against current mingw-w64
+  runtimes (`undefined reference to qemu_ftruncate64`), so the Windows build
+  builds only the `qemu-system-arm.exe` target.
 
 ## Driving it non-interactively
 

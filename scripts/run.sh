@@ -9,7 +9,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QEMU_DIR="${QEMU_DIR:-$HOME/qemu}"
-QEMU="${QEMU:-$QEMU_DIR/build/qemu-system-arm}"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) EXE=.exe; DEFAULT_AUDIO=dsound ;;
+    *)                    EXE=;     DEFAULT_AUDIO=pa     ;;
+esac
+QEMU="${QEMU:-$QEMU_DIR/build/qemu-system-arm$EXE}"
 
 BUILD="$REPO_ROOT/build"
 KERNEL="${KERNEL:-$BUILD/parts/kernel.bin}"
@@ -19,7 +23,7 @@ RAM="${RAM:-64}"
 # The board creates the AC97 device itself, so audio needs a *default* backend:
 # "-audio <driver>" (no model=) is what establishes one. Override with
 # AUDIO_DRV=alsa, or AUDIO_DRV=none to boot silently.
-AUDIO_DRV="${AUDIO_DRV:-pa}"
+AUDIO_DRV="${AUDIO_DRV:-$DEFAULT_AUDIO}"
 BOARD_ID="${BOARD_ID:-2}"
 KEYPAD_ID="${KEYPAD_ID:-0}"
 # The stock kernel's built-in cmdline is

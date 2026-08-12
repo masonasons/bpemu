@@ -175,14 +175,57 @@ Everest IDE interface at 0xc48e0000  irq:155
   literal pool. So the keypad is an auto-scanned **6 × 8 matrix**, 48 positions
   — a plausible size for a Perkins keyboard plus function and navigation keys.
 
-  This matters because QEMU already models the PXA27x KPC and `pxa270_init()`
-  instantiates it, so the driver probes successfully today. What is missing is
-  only the matrix keymap: wiring `pxa27x_register_keypad()` with a recovered
-  row/column layout should be enough to get real input, without writing a new
-  device model. Recovering which physical key sits at each of the 48 positions
-  is the outstanding work — the driver's keycode table, cross-checked against
-  `/etc/everest.keymap.gz` and the `KEY_ICON_*` constants in
-  `levelstar/sbtk/kbd.py`, is where to start.
+  The driver looks keycodes up in a table of stacked 48-entry `u32` arrays at
+  `0xc03f2dac`, indexed `keycodes[variant * 48 + row * 8 + col]`. The `variant`
+  is a global selected at runtime by writing `'0'` or `'1'` to a sysfs node
+  (`'1'` picks array 1 or 2 depending on `keypad_id`); it is 0 at boot, and the
+  probe only ever declares array 0's keycodes to the input core.
+
+  **Array 0** — the boot default — decodes to a telephone keypad plus
+  navigation and media keys:
+
+  |      | col0 | col1 | col2 | col3 | col4 | col5 | col6 |
+  |------|------|------|------|------|------|------|------|
+  | row0 | `KPASTERISK` | `BTN_7` | `BTN_4` | `BTN_1` | `OK` | `INFO` | `PROG1` |
+  | row1 | `BTN_0` | `BTN_8` | `BTN_5` | `BTN_2` | `MENU` | `SELECT` | `DOWN` |
+  | row2 | – | – | – | `BTN_RIGHT` | `BTN_LEFT` | `UP` | `PROGRAM` |
+  | row3 | `KPDOT` | `BTN_9` | `BTN_6` | `BTN_3` | `CANCEL` | `HELP` | `PROG2` |
+  | row4 | `VOLUMEUP` | `VOLUMEDOWN` | `MUTE` | `RECORD` | – | – | – |
+  | row5 | – | – | – | – | – | – | – |
+
+  Column 7 and row 5 are unpopulated. `BTN_0`–`BTN_9` are the digit keys: the
+  digits form clean columns (1/2/3 in col3, 4/5/6 in col2, 7/8/9 in col1,
+  `*`/`0`/`#` in col0), which is what confirms the `row * 8 + col` indexing
+  rather than the transpose.
+
+  **Array 1** remaps those same physical keys to values in the `0x600` range,
+  which the driver detects by testing bit `0x200` and routes separately — these
+  are the braille dots, i.e. chorded braille entry on the twelve-key pad.
+
+### The keypad needs auto-scan rescans, which QEMU does not model
+
+Wiring the matrix up via `pxa27x_register_keypad()` is necessary but not
+sufficient. Injected keys reach the guest — `/proc/interrupts` shows the
+`Keypad` count climbing by exactly two per keypress — yet nothing arrives at
+`/dev/input/event0`.
+
+The reason is in the driver's interrupt handler at `0xc01e3ad8`. It reads
+`KPC (0x00)`, `KPAS (0x20)` and `KPASMKP0..3 (0x28/0x30/0x38/0x40)` — exactly
+the registers QEMU models — XORs them against the previously saved state, and
+hands each changed column pair to a per-key state machine at `0xc01e3700`. That
+state machine is a **software debounce keyed on `jiffies`**: a key is only
+accepted once it has been observed still pressed on a *later* scan.
+
+Real PXA27x hardware in automatic-scan mode (`KPC_AS` / `KPC_ASACT`, both set
+by this driver) keeps re-interrupting for as long as any key is down, so the
+second observation always arrives. QEMU's model raises the interrupt only when
+the matrix state *changes*, so the state machine never advances past its first
+sighting and no key is ever reported.
+
+`scripts/setup.sh` therefore patches `hw/input/pxa2xx_keypad.c` to add the
+periodic rescan that auto-scan mode implies: while any key is held and
+`KPC_ME` plus `KPC_AS`/`KPC_ASACT` are set, the model re-raises the matrix
+interrupt every 10 ms.
 
   Above the driver, `/etc/StartShell` loads `/etc/everest.keymap.gz` with
   `loadkeys`, so the Perkins-style keys reach the application as ordinary Linux

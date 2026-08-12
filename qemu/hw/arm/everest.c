@@ -76,6 +76,131 @@
  */
 #define EVEREST_GPIO_SD_CARD_DETECT    4
 
+/*
+ * Keypad matrix.
+ *
+ * The board's keypad driver programs the PXA27x keypad controller with
+ * 0x37dff800, which decodes as an auto-scanned 6-row by 8-column matrix with
+ * the matrix and matrix-interrupt enables set. It then looks keycodes up in a
+ * table of stacked 48-entry u32 arrays, indexed as
+ *
+ *     keycodes[variant * 48 + row * 8 + col]
+ *
+ * with the base array at 0xc03f2dac. The variant is selected at runtime by
+ * writing '0' or '1' to a sysfs node -- variant 0 at boot, and the driver only
+ * ever declares variant 0's keycodes to the input core, so that is the table
+ * modelled here. (Variant 1 remaps the same physical keys to values in the
+ * 0x600 range, which the driver detects by testing bit 0x200 and handles
+ * separately: those are the braille dots, i.e. chorded braille entry on the
+ * twelve-key pad. Guests can still switch to it themselves; the matrix
+ * positions below do not change.)
+ *
+ * Decoded, variant 0 is a telephone keypad plus navigation and media keys:
+ *
+ *          col0        col1    col2    col3       col4      col5      col6
+ *   row0   KPASTERISK  BTN_7   BTN_4   BTN_1      OK        INFO      PROG1
+ *   row1   BTN_0       BTN_8   BTN_5   BTN_2      MENU      SELECT    DOWN
+ *   row2   -           -       -       BTN_RIGHT  BTN_LEFT  UP        PROGRAM
+ *   row3   KPDOT       BTN_9   BTN_6   BTN_3      CANCEL    HELP      PROG2
+ *   row4   VOLUMEUP    VOLUMEDOWN MUTE RECORD     -         -         -
+ *   row5   -           -       -       -          -         -         -
+ *
+ * BTN_0..BTN_9 are the digit keys; column 7 and row 5 are unpopulated. The
+ * host-key assignment below is our choice, not the device's -- the hardware
+ * has no PC keyboard.
+ */
+/*
+ * Careful: QEMU's struct keymap is { int8_t column; int8_t row; } -- column
+ * first -- so these initialisers are written (col, row), the opposite way round
+ * from the (row, col) table above.
+ */
+#define EVEREST_KP_ASTERISK   { 0, 0 }
+#define EVEREST_KP_7          { 1, 0 }
+#define EVEREST_KP_4          { 2, 0 }
+#define EVEREST_KP_1          { 3, 0 }
+#define EVEREST_KP_OK         { 4, 0 }
+#define EVEREST_KP_INFO       { 5, 0 }
+#define EVEREST_KP_PROG1      { 6, 0 }
+#define EVEREST_KP_0          { 0, 1 }
+#define EVEREST_KP_8          { 1, 1 }
+#define EVEREST_KP_5          { 2, 1 }
+#define EVEREST_KP_2          { 3, 1 }
+#define EVEREST_KP_MENU       { 4, 1 }
+#define EVEREST_KP_SELECT     { 5, 1 }
+#define EVEREST_KP_DOWN       { 6, 1 }
+#define EVEREST_KP_RIGHT      { 3, 2 }
+#define EVEREST_KP_LEFT       { 4, 2 }
+#define EVEREST_KP_UP         { 5, 2 }
+#define EVEREST_KP_PROGRAM    { 6, 2 }
+#define EVEREST_KP_HASH       { 0, 3 }
+#define EVEREST_KP_9          { 1, 3 }
+#define EVEREST_KP_6          { 2, 3 }
+#define EVEREST_KP_3          { 3, 3 }
+#define EVEREST_KP_CANCEL     { 4, 3 }
+#define EVEREST_KP_HELP       { 5, 3 }
+#define EVEREST_KP_PROG2      { 6, 3 }
+#define EVEREST_KP_VOLUP      { 0, 4 }
+#define EVEREST_KP_VOLDOWN    { 1, 4 }
+#define EVEREST_KP_MUTE       { 2, 4 }
+#define EVEREST_KP_RECORD     { 3, 4 }
+
+/*
+ * Host PC set-1 scancode -> matrix position. QEMU's PXA keypad indexes this by
+ * make code, with 0xe0-prefixed keys folded to (code | 0x80).
+ */
+static const struct keymap everest_keymap[0x100] = {
+    [0 ... 0xff]  = { -1, -1 },
+
+    /* Number row doubles as the telephone keypad. */
+    [0x02]        = EVEREST_KP_1,
+    [0x03]        = EVEREST_KP_2,
+    [0x04]        = EVEREST_KP_3,
+    [0x05]        = EVEREST_KP_4,
+    [0x06]        = EVEREST_KP_5,
+    [0x07]        = EVEREST_KP_6,
+    [0x08]        = EVEREST_KP_7,
+    [0x09]        = EVEREST_KP_8,
+    [0x0a]        = EVEREST_KP_9,
+    [0x0b]        = EVEREST_KP_0,
+
+    /* Numeric keypad, which is the closer physical analogue. */
+    [0x4f]        = EVEREST_KP_1,
+    [0x50]        = EVEREST_KP_2,
+    [0x51]        = EVEREST_KP_3,
+    [0x4b]        = EVEREST_KP_4,
+    [0x4c]        = EVEREST_KP_5,
+    [0x4d]        = EVEREST_KP_6,
+    [0x47]        = EVEREST_KP_7,
+    [0x48]        = EVEREST_KP_8,
+    [0x49]        = EVEREST_KP_9,
+    [0x52]        = EVEREST_KP_0,
+    [0x37]        = EVEREST_KP_ASTERISK,   /* keypad *      */
+    [0x53]        = EVEREST_KP_HASH,       /* keypad . as # */
+
+    /* Navigation. */
+    [0x1c]        = EVEREST_KP_OK,         /* Enter  */
+    [0x01]        = EVEREST_KP_CANCEL,     /* Escape */
+    [0xc8]        = EVEREST_KP_UP,         /* Up     */
+    [0xd0]        = EVEREST_KP_DOWN,       /* Down   */
+    [0xcb]        = EVEREST_KP_LEFT,       /* Left   */
+    [0xcd]        = EVEREST_KP_RIGHT,      /* Right  */
+
+    /* Function keys. */
+    [0x3b]        = EVEREST_KP_HELP,       /* F1 */
+    [0x3c]        = EVEREST_KP_MENU,       /* F2 */
+    [0x3d]        = EVEREST_KP_INFO,       /* F3 */
+    [0x3e]        = EVEREST_KP_SELECT,     /* F4 */
+    [0x3f]        = EVEREST_KP_PROG1,      /* F5 */
+    [0x40]        = EVEREST_KP_PROG2,      /* F6 */
+    [0x41]        = EVEREST_KP_PROGRAM,    /* F7 */
+
+    /* Media. */
+    [0xc9]        = EVEREST_KP_VOLUP,      /* Page Up   */
+    [0xd1]        = EVEREST_KP_VOLDOWN,    /* Page Down */
+    [0x32]        = EVEREST_KP_MUTE,       /* M */
+    [0x13]        = EVEREST_KP_RECORD,     /* R */
+};
+
 #define EVEREST_DEFAULT_RAM_SIZE    (64 * MiB)
 
 /*
@@ -181,6 +306,14 @@ static void everest_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(onenand), 0, EVEREST_ONENAND_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(onenand), 0,
                        qdev_get_gpio_in(mpu->gpio, EVEREST_ONENAND_GPIO));
+
+    /*
+     * Keypad. The board's driver talks to the PXA27x keypad controller that
+     * pxa270_init() already instantiates, so all that is needed is the matrix
+     * map recovered from the driver's keycode table.
+     */
+    pxa27x_register_keypad(mpu->kp, everest_keymap,
+                           ARRAY_SIZE(everest_keymap));
 
     /* Board straps read by everest_init() out of GPLR3, plus SD card detect. */
     straps = g_new0(EverestStraps, 1);
