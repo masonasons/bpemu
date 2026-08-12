@@ -24,6 +24,7 @@ param(
     [string]$Qemu,
     [string]$Kernel,
     [string]$Flash,
+    [string]$Hdd,
     [int]$Ram = 64,
     [int]$BoardId = 2,
     [int]$KeypadId = 0,
@@ -39,10 +40,16 @@ $repo = Split-Path -Parent $PSScriptRoot
 if (-not $Qemu)   { $Qemu   = Join-Path (Split-Path -Parent $repo) 'qemu-win\build\qemu-system-arm.exe' }
 if (-not $Kernel) { $Kernel = Join-Path $repo 'build\parts\kernel.bin' }
 if (-not $Flash)  { $Flash  = Join-Path $repo 'build\flash.img' }
+if (-not $Hdd)    { $Hdd    = Join-Path $repo 'build\hdd.qcow2' }
 
 foreach ($f in @($Qemu, $Kernel, $Flash)) {
     if (-not (Test-Path $f)) { throw "missing: $f" }
 }
+
+# The drive is attached only if you have already created one. It is NOT created
+# automatically yet: the IDE interrupt is not being delivered, so the guest logs
+# "hda: lost interrupt" and `insmod pxa2xx-ide` wedges inside /etc/StartShell,
+# which stops the launcher and shell starting at all.
 
 # Keep this in step with tools/bpimage.py's PARTITIONS.
 $mtdparts = 'mtdparts=onenand:1024k(bootloader),1024k(params),4096k(kernel),-(root)'
@@ -58,6 +65,9 @@ $qemuArgs = @(
     '-serial', 'mon:stdio'
     '-display', $Display
 )
+if (Test-Path $Hdd) {
+    $qemuArgs += @('-drive', "if=ide,index=0,format=qcow2,file=$Hdd")
+}
 if ($ExtraArgs) { $qemuArgs += $ExtraArgs }
 
 & $Qemu @qemuArgs

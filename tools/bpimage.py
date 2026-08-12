@@ -18,6 +18,8 @@ Usage:
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -136,6 +138,64 @@ def mkflash(partsdir, out_path, size_mb, serial, mac):
     return 0
 
 
+def find_qemu_img():
+    """Locate qemu-img, preferring the one built alongside our qemu-system-arm."""
+    candidates = []
+    qemu_dir = os.environ.get("QEMU_DIR")
+    if qemu_dir:
+        candidates.append(os.path.join(qemu_dir, "build", "qemu-img"))
+    candidates.append(os.path.expanduser("~/qemu/build/qemu-img"))
+    candidates.append(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.pardir, "qemu-win", "build", "qemu-img"))
+    for c in candidates:
+        for suffix in ("", ".exe"):
+            if os.path.isfile(c + suffix):
+                return c + suffix
+    found = shutil.which("qemu-img")
+    return found
+
+
+def mkdisk(path, size_mb, force):
+    """Create a blank image for the internal IDE drive.
+
+    The shipped Braille+ has a 60GB drive, so that is the default. The image is
+    qcow2 rather than raw: a 60GB raw file would really occupy 60GB on NTFS,
+    whereas qcow2 starts near zero and grows only as the guest writes.
+
+    The firmware partitions and formats it itself -- levelstar/sysmon/hd.py
+    drives `parted` to lay down an msdos label and a FAT partition, and runs
+    `dosfsck` on /dev/hda1 -- so a blank image is the right starting point.
+    sysmon notices it is unformatted and offers to format it, which is what a
+    factory-fresh device does.
+
+    Without *some* drive present, sysmon's setup() throws out of hdman.mount(),
+    dies with UnboundLocalError, and the user interface never comes up.
+    """
+    if os.path.exists(path) and not force:
+        print("%s already exists; pass --force to overwrite" % path)
+        return 0
+
+    qemu_img = find_qemu_img()
+    if qemu_img:
+        subprocess.check_call([qemu_img, "create", "-q", "-f", "qcow2",
+                               path, "%dM" % size_mb])
+        actual = os.path.getsize(path)
+        print("Wrote %s (%d MiB virtual, %d KiB on disk, qcow2)"
+              % (path, size_mb, actual // 1024))
+    else:
+        # No qemu-img: fall back to a raw file. truncate() is sparse on ext4
+        # and friends, but NOT on NTFS, where this really does allocate.
+        with open(path, "wb") as f:
+            f.truncate(size_mb * MiB)
+        print("Wrote %s (%d MiB, raw -- qemu-img not found)" % (path, size_mb))
+        print("WARNING: on NTFS a raw image is not sparse and occupies its "
+              "full size.")
+    print("The device will offer to format it on first boot; accept, and it "
+          "becomes /media/hdd.")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -154,6 +214,13 @@ def main(argv=None):
     p.add_argument("--mac", default="00:11:d6:04:00:01",
                    help="wireless MAC address (default 00:11:d6:04:00:01)")
 
+    p = sub.add_parser("mkdisk", help="create a blank internal IDE disk image")
+    p.add_argument("out")
+    p.add_argument("--size", type=int, default=60 * 1024,
+                   help="size in MiB (default 61440, i.e. the 60GB drive the "
+                        "Braille+ shipped with)")
+    p.add_argument("--force", action="store_true", help="overwrite an existing image")
+
     sub.add_parser("mtdparts", help="print the kernel mtdparts= argument")
 
     args = ap.parse_args(argv)
@@ -161,6 +228,8 @@ def main(argv=None):
         return unpack(args.lsi, args.outdir)
     if args.cmd == "mkflash":
         return mkflash(args.partsdir, args.out, args.size, args.serial, args.mac)
+    if args.cmd == "mkdisk":
+        return mkdisk(args.out, args.size, args.force)
     if args.cmd == "mtdparts":
         print(mtdparts())
         return 0

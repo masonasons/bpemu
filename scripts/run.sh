@@ -18,6 +18,9 @@ QEMU="${QEMU:-$QEMU_DIR/build/qemu-system-arm$EXE}"
 BUILD="$REPO_ROOT/build"
 KERNEL="${KERNEL:-$BUILD/parts/kernel.bin}"
 FLASH="${FLASH:-$BUILD/flash.img}"
+# The firmware mounts /dev/hda1 on /media/hdd, and its sysmon applet crashes in
+# a loop without a drive present, which stops the UI coming up at all.
+HDD="${HDD:-$BUILD/hdd.qcow2}"
 
 RAM="${RAM:-64}"
 # The board creates the AC97 device itself, so audio needs a *default* backend:
@@ -40,6 +43,15 @@ APPEND="${APPEND:-root=/dev/mtdblock3 rw rootfstype=jffs2 console=ttyS0,115200 $
 for f in "$QEMU" "$KERNEL" "$FLASH"; do
     [ -e "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
+# The drive is attached only if you have created one. It is NOT created
+# automatically yet: the IDE interrupt is not being delivered, so the guest logs
+# "hda: lost interrupt" and `insmod pxa2xx-ide` wedges inside /etc/StartShell,
+# which stops the launcher and shell starting at all. Until that is fixed,
+# booting without a drive is the better of two broken options.
+HDD_ARGS=""
+if [ -e "$HDD" ]; then
+    HDD_ARGS="-drive if=ide,index=0,format=qcow2,file=$HDD"
+fi
 
 exec "$QEMU" \
     -M "everest,board-id=$BOARD_ID,keypad-id=$KEYPAD_ID" \
@@ -47,6 +59,7 @@ exec "$QEMU" \
     -kernel "$KERNEL" \
     -append "$APPEND" \
     -drive if=mtd,format=raw,file="$FLASH" \
+    $HDD_ARGS \
     -audio "$AUDIO_DRV" \
     -serial mon:stdio \
     -display "$DISPLAY_BACKEND" \

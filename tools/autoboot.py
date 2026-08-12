@@ -114,6 +114,19 @@ class Monitor:
             pass
         return out
 
+    def command(self, cmd):
+        """Run an arbitrary monitor command and return its reply.
+
+        Handy for reading device registers with `xp`, which goes through the
+        MMIO dispatch and so reflects what the model would hand the guest.
+        """
+        self.sock.sendall(cmd.encode() + b"\n")
+        time.sleep(0.5)
+        reply = self._drain().decode("utf-8", "replace").replace("\r", "")
+        lines = [ln.strip() for ln in reply.split("\n")]
+        return " | ".join(ln for ln in lines
+                          if ln and cmd not in ln and ln != "(qemu)")
+
     def sendkey(self, key, hold_ms=None):
         cmd = "sendkey %s" % key
         if hold_ms:
@@ -137,7 +150,12 @@ class OrderedStep(argparse.Action):
         if steps is None:
             steps = []
             setattr(namespace, "steps", steps)
-        kind = "key" if option_string in ("-k", "--key") else "cmd"
+        if option_string in ("-k", "--key"):
+            kind = "key"
+        elif option_string in ("-m", "--mon"):
+            kind = "mon"
+        else:
+            kind = "cmd"
         steps.append((kind, values))
 
 
@@ -146,6 +164,9 @@ def main():
     ap.add_argument("--qemu", default=DEFAULT_QEMU)
     ap.add_argument("--kernel", required=True)
     ap.add_argument("--flash", required=True)
+    ap.add_argument("--hdd", default=None,
+                    help="internal IDE disk image; without one the firmware's "
+                         "sysmon applet crash-loops and the UI never starts")
     ap.add_argument("--ram", default="64")
     ap.add_argument("--board-id", default="2")
     ap.add_argument("--keypad-id", default="0")
@@ -159,6 +180,8 @@ def main():
     ap.add_argument("-k", "--key", action=OrderedStep,
                     help="QEMU sendkey name to inject, e.g. kp_1 (repeatable); "
                          "ordering with -c is preserved")
+    ap.add_argument("-m", "--mon", action=OrderedStep,
+                    help="QEMU monitor command to run, e.g. 'xp/1xw 0x40e00038'")
     ap.add_argument("--key-hold-ms", type=int, default=800,
                     help="how long to hold each injected key (default 800). "
                          "QEMU's default of 100ms is often too short for a "
@@ -167,7 +190,7 @@ def main():
     steps = getattr(args, "steps", None) or []
 
     monitor_path = None
-    if any(kind == "key" for kind, _ in steps):
+    if any(kind in ("key", "mon") for kind, _ in steps):
         monitor_path = os.path.join(tempfile.mkdtemp(prefix="bpemu-"), "mon")
 
     argv = [
@@ -181,6 +204,8 @@ def main():
         "-serial", "stdio",
         "-display", "none",
     ]
+    if args.hdd:
+        argv += ["-drive", "if=ide,index=0,format=qcow2,file=%s" % args.hdd]
     if monitor_path:
         argv += ["-monitor", "unix:%s,server,nowait" % monitor_path]
     else:
@@ -201,6 +226,9 @@ def main():
         mon = Monitor(monitor_path) if monitor_path else None
 
         for kind, value in steps:
+            if kind == "mon":
+                print("$ %s -> %s" % (value, mon.command(value)), flush=True)
+                continue
             if kind == "key":
                 err = mon.sendkey(value, args.key_hold_ms)
                 print("* sendkey %s%s" % (value, "  -> %s" % err if err else ""),

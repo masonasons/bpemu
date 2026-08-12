@@ -21,6 +21,7 @@
 #include "hw/boards.h"
 #include "hw/audio/pxa2xx_ac97.h"
 #include "hw/block/flash.h"
+#include "hw/ide/mmio.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
@@ -92,6 +93,29 @@
  * reads the matrix correctly, but nothing ever reaches /dev/input.
  */
 #define EVEREST_GPIO_KEY_LOCK         93
+
+/*
+ * Internal IDE hard drive, on PXA nCS5. The kernel's `pxa2xx_ide` platform
+ * device declares MEM 0x14000000-0x1400ffff and IRQ 155 (GPIO 91), and the
+ * driver then reports
+ *
+ *     ide0 at 0xc48e0020-0xc48e002e,0xc48e001c on irq 155
+ *
+ * relative to its ioremap base -- an eight-register command block at offset
+ * 0x20 on a two-byte stride, with the control/altstatus register at 0x1c.
+ *
+ * This is not optional furniture either. /etc/fstab mounts /dev/hda1 on
+ * /media/hdd, and with no drive the sysmon applet's setup() throws out of
+ * hdman.mount() and hdman.checkFormat(), falls through to
+ * `return self.activateApplet(question)` with `question` never assigned, and
+ * dies with UnboundLocalError. The shell restarts it and it dies again, so the
+ * user interface never finishes coming up and the device stays silent.
+ */
+#define EVEREST_IDE_BASE          0x14000000
+#define EVEREST_IDE_CMD_OFFSET    0x20
+#define EVEREST_IDE_CTRL_OFFSET   0x1c
+#define EVEREST_IDE_REG_SHIFT     1
+#define EVEREST_GPIO_IDE          91
 
 /*
  * Keypad matrix.
@@ -299,6 +323,34 @@ static void everest_strap(DeviceState *gpio, int first_gpio,
     }
 }
 
+/*
+ * The IDE controller's interrupt reaches the CPU through a PXA GPIO, and the
+ * PXA GPIO block only latches *edges*. QEMU's IDE core, like the real ATA
+ * interface, holds its interrupt line asserted until the guest reads the status
+ * register -- so when it asserts again for the next command while the line is
+ * still high, the GPIO sees no transition and the interrupt is simply lost. The
+ * guest then reports "hda: lost interrupt" and `insmod pxa2xx-ide` never
+ * returns, which wedges /etc/StartShell and stops the whole user interface.
+ *
+ * Re-present each assertion as a fresh low-to-high transition so the GPIO
+ * always has an edge to latch.
+ */
+typedef struct EverestIdeIrq {
+    qemu_irq out;
+} EverestIdeIrq;
+
+static void everest_ide_irq_handler(void *opaque, int n, int level)
+{
+    EverestIdeIrq *s = opaque;
+
+    if (level) {
+        qemu_irq_lower(s->out);
+        qemu_irq_raise(s->out);
+    } else {
+        qemu_irq_lower(s->out);
+    }
+}
+
 static void everest_straps_reset(void *opaque)
 {
     EverestStraps *st = opaque;
@@ -322,8 +374,10 @@ static void everest_init(MachineState *machine)
     PXA2xxState *mpu;
     DeviceState *onenand;
     DeviceState *ac97;
+    DeviceState *ide;
     DriveInfo *dinfo;
     EverestStraps *straps;
+    EverestIdeIrq *ide_irq;
 
     mpu = pxa270_init(machine->ram_size, machine->cpu_type);
 
@@ -361,6 +415,29 @@ static void everest_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(onenand), 0, EVEREST_ONENAND_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(onenand), 0,
                        qdev_get_gpio_in(mpu->gpio, EVEREST_ONENAND_GPIO));
+
+    /* Internal IDE hard drive on nCS5, mounted by the firmware on /media/hdd. */
+    ide = qdev_new(TYPE_MMIO_IDE);
+    qdev_prop_set_uint32(ide, "shift", EVEREST_IDE_REG_SHIFT);
+
+    /*
+     * Connect the interrupt *before* realizing. mmio-ide's realize does
+     * `bus->irq = s->irq`, taking a copy, while sysbus_connect_irq() only
+     * assigns s->irq afterwards -- so connecting in the usual order leaves
+     * bus->irq NULL. Nothing complains, because qemu_set_irq() ignores a NULL
+     * irq, and the drive is then detected but never interrupts.
+     */
+    ide_irq = g_new0(EverestIdeIrq, 1);
+    ide_irq->out = qdev_get_gpio_in(mpu->gpio, EVEREST_GPIO_IDE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(ide), 0,
+                       qemu_allocate_irq(everest_ide_irq_handler, ide_irq, 0));
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(ide), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(ide), 0,
+                    EVEREST_IDE_BASE + EVEREST_IDE_CMD_OFFSET);
+    sysbus_mmio_map(SYS_BUS_DEVICE(ide), 1,
+                    EVEREST_IDE_BASE + EVEREST_IDE_CTRL_OFFSET);
+    mmio_ide_init_drives(ide, drive_get(IF_IDE, 0, 0), drive_get(IF_IDE, 0, 1));
 
     /*
      * Keypad. The board's driver talks to the PXA27x keypad controller that

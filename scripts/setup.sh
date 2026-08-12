@@ -70,6 +70,7 @@ config EVEREST
     select PXA2XX
     select ONENAND
     select PXA2XX_AC97
+    select IDE_MMIO
 EOF
 
 AUDIO_KCONFIG="$QEMU_DIR/hw/audio/Kconfig"
@@ -164,7 +165,7 @@ if [ -n "$EXE" ]; then
     # Build only the emulator. QEMU 9.1's test binaries do not link against
     # current mingw-w64 runtimes (undefined reference to qemu_ftruncate64),
     # and a full build would fail on them for no benefit here.
-    (cd "$QEMU_DIR/build" && ninja -j"$(nproc)" "qemu-system-arm$EXE")
+    (cd "$QEMU_DIR/build" && ninja -j"$(nproc)" "qemu-system-arm$EXE" "qemu-img$EXE")
 else
     (cd "$QEMU_DIR/build" && ninja -j"$(nproc)")
 fi
