@@ -34,7 +34,7 @@ run as they were flashed.
 
 | | Status |
 |---|---|
-| Boot to userspace and a login shell | ✅ ~45 s under TCG once configured |
+| Boot to userspace and a login shell | ✅ ~30 s under TCG once configured |
 | OneNAND boot flash, 4 MTD partitions, JFFS2 root read-write | ✅ |
 | Audio output (AC97 + WM9713) | ✅ new device models |
 | Python application launcher starts | ✅ |
@@ -108,7 +108,13 @@ python3 tools/autoboot.py \
 ```
 
 That last command is the end-to-end audio test: it should exit 0 and leave
-about 200 KiB of 44.1 kHz stereo PCM in `/tmp/out.wav`.
+about 200 KiB of 44.1 kHz stereo PCM in `/tmp/out.wav`. Expect the capture to
+come up ~10 KiB short of what you sent — that is the audio still in flight in
+the FIFO when QEMU is killed, not lost samples. Add a trailing `-c 'sleep 2'`
+if you want it flushed.
+
+Note the guest is BusyBox 1.2.1 from 2010; its `head` has no `-N` form and many
+other options you would reach for are absent.
 
 ## Machine options
 

@@ -158,16 +158,31 @@ Everest IDE interface at 0xc48e0000  irq:155
 ```
 
 - **Keypad** — a board-specific driver that registers input device
-  `everestkeypad/input0`, named "Everest keypad.". It appears to drive the
-  **PXA27x keypad controller (KPC) at `0x41500000`** rather than bit-banging
-  GPIOs: the literal `0x37dff800` written to that address decodes as a KPC
-  configuration for an automatically scanned 6-row by 8-column matrix, and a
-  sibling constant `0x3bdff800` sits in the driver's literal pool. That matters
-  because QEMU already models the PXA27x KPC, and `pxa270_init()` instantiates
-  it, so the driver probes successfully today — what is missing is only the
-  matrix keymap. Wiring `pxa27x_register_keypad()` with a recovered row/column
-  layout should therefore be enough to get real input, without writing a new
-  device model. That layout has not been recovered yet.
+  `everestkeypad/input0`, named "Everest keypad.". It drives the **PXA27x
+  keypad controller (KPC) at `0x41500000`** rather than bit-banging GPIOs. The
+  literal `0x37dff800` written to that address decodes cleanly against the KPC
+  bit layout:
+
+  | Bits | Field | Value |
+  |---|---|---|
+  | 29 | `KPC_ASACT` | set — automatic scan on activity |
+  | 28:26 | `KPC_MKRN` | 5 → **6 matrix rows** |
+  | 25:23 | `KPC_MKCN` | 7 → **8 matrix columns** |
+  | 12 | `KPC_ME` | set — matrix keypad enabled |
+  | 11 | `KPC_MIE` | set — matrix interrupt enabled |
+
+  A sibling constant `0x3bdff800` (same, plus `KPC_AS`) sits in the driver's
+  literal pool. So the keypad is an auto-scanned **6 × 8 matrix**, 48 positions
+  — a plausible size for a Perkins keyboard plus function and navigation keys.
+
+  This matters because QEMU already models the PXA27x KPC and `pxa270_init()`
+  instantiates it, so the driver probes successfully today. What is missing is
+  only the matrix keymap: wiring `pxa27x_register_keypad()` with a recovered
+  row/column layout should be enough to get real input, without writing a new
+  device model. Recovering which physical key sits at each of the 48 positions
+  is the outstanding work — the driver's keycode table, cross-checked against
+  `/etc/everest.keymap.gz` and the `KEY_ICON_*` constants in
+  `levelstar/sbtk/kbd.py`, is where to start.
 
   Above the driver, `/etc/StartShell` loads `/etc/everest.keymap.gz` with
   `loadkeys`, so the Perkins-style keys reach the application as ordinary Linux
