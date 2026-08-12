@@ -18,6 +18,17 @@
     but it is what captures your keystrokes and feeds them to the emulated
     keypad. Give that window focus to type on the device. Pass 'none' for a
     headless run driven purely from the serial console.
+
+.PARAMETER Net
+    Attach the emulated RTL8150 USB ethernet adapter, which the firmware has a
+    driver for, behind QEMU user-mode networking. The guest does not configure
+    it on its own; from the device's shell run:
+
+        ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
+        route add default gw 10.0.2.2
+
+    The real hardware's WiFi and Bluetooth are a proprietary combo chip that
+    cannot be emulated, so this wired adapter is the substitute.
 #>
 [CmdletBinding()]
 param(
@@ -30,6 +41,7 @@ param(
     [int]$KeypadId = 1,
     [string]$AudioDrv = 'dsound',
     [string]$Display = 'sdl',
+    [switch]$Net,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
@@ -72,6 +84,9 @@ $qemuArgs = @(
     '-serial', 'mon:stdio'
     '-display', $Display
 )
+if ($Net) {
+    $qemuArgs += @('-netdev', 'user,id=bpnet', '-device', 'usb-rtl8150,netdev=bpnet')
+}
 if ($ExtraArgs) { $qemuArgs += $ExtraArgs }
 
 & $Qemu @qemuArgs

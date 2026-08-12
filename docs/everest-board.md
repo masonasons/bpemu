@@ -385,6 +385,78 @@ therefore re-presents the request level on a 2 ms timer while the AC-link is
 up; once samples flow, the PCDR writes and the audio callback keep the line
 current and the timer merely idles.
 
+## Networking: an RTL8150 on the OHCI bus
+
+The real unit's wireless is a Stonestreet One BGW200 combo part on SPI with a
+binary-only driver, and QEMU dropped its Bluetooth stack in 5.0, so neither can
+be modelled. What the firmware *does* carry is a driver for the Realtek RTL8150
+USB ethernet chip, and the PXA270's OHCI controller is already wired up, so
+attaching one gives the guest a working network with no firmware changes:
+
+```
+-netdev user,id=bpnet -device usb-rtl8150,netdev=bpnet
+```
+
+The device model lives in `hw/usb/dev-rtl8150.c`. Registers sit at 0x0120-0x014f
+with bulk IN on endpoint 1, bulk OUT on 2 and an interrupt IN on 3, matching the
+`usb_rcvbulkpipe(1)` / `usb_sndbulkpipe(2)` / `usb_rcvintpipe(3)` calls in
+`rtl8150_open()`. Three things about it are worth recording, because each one
+produced a symptom that pointed somewhere else entirely.
+
+### Self-clearing bits
+
+`CR_SOFT_RESET` (0x10 in CR) and `PHY_GO` (0x40 in PHYCNT) are self-clearing on
+real silicon. A model that stores register writes verbatim hangs the driver:
+`rtl8150_reset()` spins on the reset bit until it times out and probe fails with
+`-EIO`, and `read_mii_word()` spins on `PHY_GO` forever. This is a recurring
+shape in this codebase -- the same trap appears in the AC97 model.
+
+### The carrier is decided twice, by two different registers
+
+`rtl8150_open()` calls `set_carrier()`, which reads **CSCR** and tests
+`CSCR_LINK_STATUS` (1<<3). But `intr_callback()`, which runs on every poll of
+the interrupt endpoint, reads byte 2 of the 8-byte payload as **MSR** and calls
+`netif_carrier_off()` whenever `MSR_LINK` is clear. Both have to say "up".
+
+`MSR_LINK` is `1<<2`, `MSR_SPEED` is `1<<3`, `MSR_DUPLEX` is `1<<4` -- low bits,
+not high ones. Reporting a plausible-looking `0xe0` there sets three unrelated
+bits and leaves link clear, so the carrier is switched on by `set_carrier()` and
+switched straight back off by the first interrupt poll. The interface then comes
+up `BROADCAST MULTICAST` without `RUNNING`, the stack never transmits, and every
+ping is lost with nothing in the logs to explain it.
+
+### A bulk transfer is not a frame
+
+This is the one that cost the most time. A bulk transfer arrives as a run of
+`wMaxPacketSize` (64 byte) packets terminated by a short one, and the device
+handler is called once per *packet*, not once per transfer. Calling
+`qemu_send_packet()` on each one chops every frame over 64 bytes into a
+truncated head plus a stray fragment:
+
+```
+ 3 len=  60 ARP           <- fits in one packet, works
+ 4 len=  64 IPv4          <- a 98-byte ICMP echo,
+ 5 len=  34 (junk)        <- in two pieces
+```
+
+ARP requests are 60 bytes, so address resolution succeeded and its reply came
+back, while every ping was silently dropped by the far side. The result looks
+exactly like a *receive* fault, and the receive path is where the time went.
+`hw/usb/dev-network.c` shows the correct idiom: accumulate into a buffer and
+send when a short packet arrives. `rtl8150_start_xmit()` pads runts to 60 and
+appends one byte when the length would otherwise be a multiple of 64, which is
+precisely what guarantees the terminating packet is always short.
+
+The same segmentation applies in reverse. Copying a whole frame into one packet
+trips the assert in `usb_packet_copy()` as soon as anything larger than 64 bytes
+arrives, so receive has to be metered out per packet too -- with a zero-length
+packet to terminate a transfer that is a whole number of packets, as the silicon
+would send.
+
+Verified with `ping` at 56, 82 and 1400 byte payloads; the 82-byte case is the
+one that makes frame plus status word exactly 128 bytes and exercises the
+zero-length terminator.
+
 ## Boot sequence
 
 ```
@@ -409,7 +481,12 @@ Root has an empty password (`root::0:0:root:/home/root:/bin/sh`).
 - **RAM size and OneNAND capacity are assumptions**, not measurements; both are
   supplied by a bootloader we cannot read.
 - **The partition sizes are ours.** Only the ordering is attested by firmware.
-- The battery and vibration motor are not modelled, so the battery reads absent.
+- The vibration motor is not modelled. The battery is, through the WM9713
+  digitiser, and reads a steady 4.0V unless `battery-mv` says otherwise.
+- **WiFi and Bluetooth cannot be emulated.** The BGW200 is a proprietary
+  Stonestreet One combo part on SPI with a binary-only driver, and QEMU removed
+  its Bluetooth stack in 5.0. An RTL8150 USB ethernet adapter stands in; see
+  the networking section.
 - `dbus-launch` fails because it tries to autolaunch via X11, so the launcher
   logs `GConf Error: No D-BUS daemon running` in a loop. The firmware ships
   `Xfbdev`/`Xfake`; a headless device presumably never needed a working session

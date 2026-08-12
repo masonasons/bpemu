@@ -45,6 +45,7 @@ info "Installing board and device sources"
 mkdir -p "$QEMU_DIR/include/hw/audio"
 cp "$REPO_ROOT/qemu/hw/arm/everest.c"                    "$QEMU_DIR/hw/arm/everest.c"
 cp "$REPO_ROOT/qemu/hw/audio/pxa2xx_ac97.c"              "$QEMU_DIR/hw/audio/pxa2xx_ac97.c"
+cp "$REPO_ROOT/qemu/hw/usb/dev-rtl8150.c"                "$QEMU_DIR/hw/usb/dev-rtl8150.c"
 cp "$REPO_ROOT/qemu/include/hw/audio/pxa2xx_ac97.h"      "$QEMU_DIR/include/hw/audio/pxa2xx_ac97.h"
 
 MARKER='# >>> bpemu everest board >>>'
@@ -71,6 +72,7 @@ config EVEREST
     select ONENAND
     select PXA2XX_AC97
     select IDE_MMIO
+    select USB_RTL8150
 EOF
 
 AUDIO_KCONFIG="$QEMU_DIR/hw/audio/Kconfig"
@@ -140,6 +142,25 @@ open(path, 'w', encoding='utf-8', newline='\n').write(src)
 PYEOF
     fi
 fi
+
+USB_KCONFIG="$QEMU_DIR/hw/usb/Kconfig"
+info "Adding CONFIG_USB_RTL8150 to hw/usb/Kconfig"
+unpatch "$USB_KCONFIG"
+cat >> "$USB_KCONFIG" <<EOF
+$MARKER
+config USB_RTL8150
+    bool
+    default y
+    depends on USB
+EOF
+
+USB_MESON="$QEMU_DIR/hw/usb/meson.build"
+info "Adding dev-rtl8150.c to hw/usb/meson.build"
+unpatch "$USB_MESON"
+cat >> "$USB_MESON" <<EOF
+$MARKER
+system_ss.add(when: 'CONFIG_USB_RTL8150', if_true: files('dev-rtl8150.c'))
+EOF
 
 AUDIO_MESON="$QEMU_DIR/hw/audio/meson.build"
 info "Adding pxa2xx_ac97.c to hw/audio/meson.build"

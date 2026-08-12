@@ -44,14 +44,25 @@ APPEND="${APPEND:-root=/dev/mtdblock3 rw rootfstype=jffs2 console=ttyS0,115200 $
 for f in "$QEMU" "$KERNEL" "$FLASH"; do
     [ -e "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
-# The drive is attached only if you have created one. It is NOT created
-# automatically yet: the IDE interrupt is not being delivered, so the guest logs
-# "hda: lost interrupt" and `insmod pxa2xx-ide` wedges inside /etc/StartShell,
-# which stops the launcher and shell starting at all. Until that is fixed,
-# booting without a drive is the better of two broken options.
-HDD_ARGS=""
-if [ -e "$HDD" ]; then
-    HDD_ARGS="-drive if=ide,index=0,format=qcow2,file=$HDD"
+# The firmware mounts /dev/hda1 on /media/hdd, and without a drive its sysmon
+# applet dies in setup() and is restarted forever, so the interface never comes
+# up and never speaks. Create the drive on demand; qcow2 keeps a 60GB disk down
+# to a couple of hundred KB until the guest writes to it.
+if [ ! -e "$HDD" ]; then
+    echo "Creating the internal 60GB drive at $HDD"
+    python3 "$REPO_ROOT/tools/bpimage.py" mkdisk "$HDD"
+    echo "It is blank, so the device will offer to format it on first boot."
+fi
+
+# The real hardware's WiFi and Bluetooth are a proprietary combo chip that
+# cannot be emulated. NET=1 attaches an RTL8150 USB ethernet adapter instead,
+# which the firmware already has a driver for. The guest does not configure it
+# on its own -- from the device's shell run:
+#   ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
+#   route add default gw 10.0.2.2
+NET_ARGS=""
+if [ -n "${NET:-}" ]; then
+    NET_ARGS="-netdev user,id=bpnet -device usb-rtl8150,netdev=bpnet"
 fi
 
 exec "$QEMU" \
@@ -60,7 +71,8 @@ exec "$QEMU" \
     -kernel "$KERNEL" \
     -append "$APPEND" \
     -drive if=mtd,format=raw,file="$FLASH" \
-    $HDD_ARGS \
+    -drive if=ide,index=0,format=qcow2,file="$HDD" \
+    $NET_ARGS \
     -audio "$AUDIO_DRV" \
     -serial mon:stdio \
     -display "$DISPLAY_BACKEND" \
