@@ -32,7 +32,8 @@ AUDIO_DRV="${AUDIO_DRV:-$DEFAULT_AUDIO}"
 # headless run driven only from the serial console.
 DISPLAY_BACKEND="${DISPLAY_BACKEND:-sdl}"
 BOARD_ID="${BOARD_ID:-2}"
-KEYPAD_ID="${KEYPAD_ID:-0}"
+# 1 selects the keycode array that has space, shift and control.
+KEYPAD_ID="${KEYPAD_ID:-1}"
 # The stock kernel's built-in cmdline is
 #   root=/dev/mtdblock2 rw rootfstype=jffs2 console=ttyS0,115200
 # but the shipped /etc/fstab mounts mtdblock3, i.e. the real bootloader passes

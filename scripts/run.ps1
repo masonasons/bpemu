@@ -27,7 +27,7 @@ param(
     [string]$Hdd,
     [int]$Ram = 64,
     [int]$BoardId = 2,
-    [int]$KeypadId = 0,
+    [int]$KeypadId = 1,
     [string]$AudioDrv = 'dsound',
     [string]$Display = 'sdl',
     [Parameter(ValueFromRemainingArguments = $true)]
