@@ -1,0 +1,7 @@
+# These are run by bash (under WSL or Linux) and by QEMU's build system.
+# CRLF would break the shebang lines, so keep LF regardless of core.autocrlf.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.md    text eol=lf
