@@ -1,5 +1,7 @@
 # Firmware bundles and anything unpacked from them are not ours to redistribute.
 build/
+# Anchored, so it does not also swallow scripts/dist/, which is source.
+/dist/
 *.lsi
 *.img
 *.bin

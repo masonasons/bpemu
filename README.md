@@ -38,10 +38,13 @@ run as they were flashed.
 | OneNAND boot flash, 4 MTD partitions, JFFS2 root read-write | ✅ |
 | Audio output (AC97 + WM9713) | ✅ new device models |
 | Python application launcher starts | ✅ |
-| Serial console, networking, SSH, Samba, Bluetooth stack | ✅ as far as the firmware takes them |
+| Serial console, SSH, Samba | ✅ as far as the firmware takes them |
 | Native Windows build (no WSL) | ✅ self-contained `qemu-system-arm.exe` |
 | Keypad input, including chorded braille | ✅ see [Keys](#keys) |
-| Battery, vibration motor | ❌ drivers load, hardware unmodelled |
+| Wired networking | ✅ emulated RTL8150, see [Networking](#networking) |
+| Battery gauge | ✅ via the WM9713 digitiser |
+| WiFi and Bluetooth | ❌ proprietary combo chip, cannot be emulated |
+| Vibration motor | ❌ driver loads, hardware unmodelled |
 | Audio capture | ❌ reads silence |
 
 QEMU has no PXA2xx AC97 controller and no WM9713 codec, so this repo adds both
@@ -164,6 +167,56 @@ if you want it flushed.
 Note the guest is BusyBox 1.2.1 from 2010; its `head` has no `-N` form and many
 other options you would reach for are absent.
 
+## Networking
+
+The device's own WiFi and Bluetooth are a proprietary Stonestreet One BGW200
+combo chip on SPI, driven by a binary-only module, and QEMU dropped its
+Bluetooth stack in 5.0 — neither can be modelled. The firmware does, however,
+carry a driver for the Realtek RTL8150 USB ethernet chip, and the PXA270's OHCI
+controller is already wired up, so `qemu/hw/usb/dev-rtl8150.c` gives the guest a
+working network with no firmware changes:
+
+```powershell
+.\scripts\run.ps1 -Net          # Windows
+NET=1 ./scripts/run.sh          # Linux / WSL
+```
+
+The firmware never expected a wired adapter, so it does not configure one. From
+the device's shell:
+
+```sh
+ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
+route add default gw 10.0.2.2
+```
+
+Verified with `ping` at 56, 82 and 1400 byte payloads. The docs record the three
+traps in the device model, of which the interesting one is that a bulk transfer
+is delivered a packet at a time rather than a frame at a time.
+
+## Building a standalone package
+
+To give the emulator to someone who has no build tools — no MSYS2, no WSL, no
+Python:
+
+```powershell
+.\scripts\setup-windows.ps1     # produces the binary
+.\scripts\make-dist.ps1 -Zip    # assembles dist\BraillePlusEmulator[.zip]
+.\scripts\test-dist.ps1         # proves it runs without any of the above
+```
+
+The result is a folder with the emulator, its DLLs, the firmware images, a
+double-clickable `BraillePlus.bat` and a plain-language README. The 60GB drive
+is created on first run with the bundled `qemu-img.exe`, so nothing large ships
+inside it.
+
+`test-dist.ps1` is the part worth keeping: it copies the package outside the
+repo, strips `PATH` down to the Windows directories, and boots it both headless
+and with the default window and sound. That is the only reliable way to catch a
+dependency that resolves on the build machine and nowhere else.
+
+Pass `-NoFirmware` to build a package without the firmware images. That is the
+form that is unambiguously yours to redistribute — see [Licence](#licence).
+
 ## Keys
 
 The device has a 6×7 keypad matrix — a telephone keypad, function and
@@ -222,9 +275,14 @@ measurements.
 qemu/hw/arm/everest.c              the board
 qemu/hw/audio/pxa2xx_ac97.c        PXA27x AC97 controller + WM9713 codec
 qemu/include/hw/audio/pxa2xx_ac97.h
+qemu/hw/usb/dev-rtl8150.c          RTL8150 USB ethernet adapter
 scripts/setup.sh                   clone + patch + build QEMU
+scripts/setup-windows.ps1          the same, through MSYS2, for a native .exe
 scripts/build-image.sh             .lsi -> OneNAND flash image
-scripts/run.sh                     boot it
+scripts/run.sh, run.ps1            boot it
+scripts/make-dist.ps1              assemble the standalone package
+scripts/test-dist.ps1              verify that package on a clean PATH
+scripts/dist/                      launcher and README that ship inside it
 tools/bpimage.py                   unpack firmware, assemble flash images
 tools/autoboot.py                  scripted console driver
 docs/everest-board.md              what the hardware is, and how we know
@@ -248,8 +306,11 @@ The honest ones, in rough order of how much they matter:
 - **RAM size, flash capacity and partition sizes are informed assumptions.**
   They come from a bootloader we cannot read. Partition *ordering* is attested
   by the firmware itself. See the docs for the derivations.
-- Audio capture returns silence; battery reads absent; the vibration motor goes
-  nowhere.
+- **WiFi and Bluetooth cannot be emulated.** The BGW200 is a proprietary
+  Stonestreet One combo part on SPI with a binary-only driver, and QEMU removed
+  its Bluetooth stack in 5.0. The RTL8150 adapter is a substitute for wired
+  connectivity, not a reproduction of what the device does.
+- Audio capture returns silence and the vibration motor goes nowhere.
 - The `.so` extension modules in the firmware are ARM binaries and stay that
   way — this is full-system emulation, so that is fine, but it is why a native
   port would be a very different project.
@@ -268,3 +329,12 @@ easier to read than the `.pyo` files in the firmware.
 ## Licence
 
 The QEMU board and device sources under `qemu/` are GPL v2, matching QEMU.
+`make-dist.ps1` copies them into the package's `src/` folder, since shipping a
+QEMU binary carries the obligation to offer the corresponding source.
+
+The firmware is a separate matter. It is the copyrighted work of the American
+Printing House for the Blind / LevelStar and includes a licensed copy of the
+Eloquence speech synthesiser. Nothing in this repository grants any right to it,
+and a package built with the firmware included is only yours to pass on if your
+rights to that firmware allow it. `make-dist.ps1 -NoFirmware` builds one that
+sidesteps the question entirely.
