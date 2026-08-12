@@ -1,0 +1,263 @@
+# The "Everest" board, as recovered from firmware
+
+Everything here was derived by static analysis of the stock `2.2.53` firmware
+bundle. No hardware, schematic or vendor documentation was consulted, so each
+claim below is followed by how it was established — if you have a real unit and
+find a discrepancy, the derivation is the thing to re-check.
+
+## Identity
+
+| Property | Value | How it was found |
+|---|---|---|
+| Marketing names | LevelStar Icon, APH Braille+ Mobile Manager | `Machine:` banner |
+| Board name | `LevelStar Icon (Everest Board)` | `machine_desc.name` |
+| ARM machine type | **1150** (`0x47e`) | `machine_desc.nr` |
+| SoC | Marvell/Intel PXA270 (XScale, ARMv5TE) | `CPU: XScale-PXA270` |
+| Kernel | Linux 2.6.31, gcc 3.4.4, PREEMPT | version banner |
+| Build system | OpenEmbedded / Poky ("OpenedHand Linux (Poky) 3.1") | `/etc/issue` |
+| Userland | Python 2.6 application stack + Eloquence ECI TTS | `/etc/StartShell` |
+
+The kernel is a plain ARM `zImage`: gzip payload at file offset `0x3404`,
+decompressing to a 4,153,632-byte image that loads at `0xc0008000`.
+
+The `machine_desc` record sits at file offset `0x15a8c` in the decompressed
+image:
+
+```
+nr           0x0000047e   (1150)
+phys_io      0x40000000
+io_pg_offst  0x00003c80   -> virtual 0xf2000000
+name         0xc037d250   -> "LevelStar Icon (Everest Board)"
+boot_params  0xa0000100
+map_io       0xc000ba8c
+init_irq     0xc000c0f4
+init_machine 0xc000c244   (everest_init)
+```
+
+## Memory map
+
+`everest_map_io()` installs the stock five-entry PXA table via `iotable_init()`
+(array at `0xc0020180`):
+
+| Virtual | Physical | Size | Meaning |
+|---|---|---|---|
+| `0xf2000000` | `0x40000000` | 32 MiB | PXA peripherals |
+| `0xf6000000` | `0x48000000` | 2 MiB | PXA memory controller |
+| `0xfa000000` | `0x50000000` | 1 MiB | |
+| `0xfe000000` | `0x58000000` | 1 MiB | |
+| `0xff000000` | `0x00000000` | 1 MiB | nCS0 boot flash window |
+
+SDRAM is at `0xa0000000` with ATAGs at `0xa0000100`. RAM size is *not* recorded
+anywhere in the firmware — the bootloader passes it in ATAGs, and we do not have
+a readable bootloader. The emulator defaults to 64 MiB, which is the common
+PXA270 single-bank population and boots the stock image fine; treat it as an
+assumption, not a measurement.
+
+## Boot flash: OneNAND on nCS0
+
+The kernel registers a platform device named `onenand` (struct at `0xc03d6b74`)
+with three resources at `0xc03d6c30`:
+
+| # | Type | Range |
+|---|---|---|
+| 0 | `IORESOURCE_MEM` | `0x00000000`–`0x03ffffff` (nCS0, 64 MiB window) |
+| 1 | `IORESOURCE_MEM` | `0x04000000`–`0x07ffffff` (nCS1, 64 MiB window) |
+| 2 | `IORESOURCE_IRQ` | 84 — i.e. GPIO 20, since Linux 2.6.31 maps `IRQ_GPIO(x) = 64 + x` |
+
+Three independent lines of evidence agree on OneNAND rather than raw NAND:
+
+1. The PXA270 has **no NAND controller**. A NOR-like OneNAND part is the only
+   thing that drops straight onto the static memory bus, and the static mapping
+   of nCS0 above is exactly the window it needs.
+2. The shipped `root.bin` JFFS2 image has a **128 KiB erase block** (measured
+   by walking the node chain and finding the resync boundaries: 412 gaps at
+   `0x20000`) and carries **no inline cleanmarkers** — i.e. they live in OOB.
+   That is OneNAND geometry: 2 KiB page, 64 B OOB, 128 KiB block.
+3. The kernel carries the full OneNAND stack including `flexonenand`.
+
+The emulated part is a 128 MiB Samsung-style device (`device_id = 0x30`, since
+QEMU derives size as `1 << (24 + ((id >> 4) & 7))`). The real capacity is not
+recorded in the firmware; 128 MiB comfortably holds the 55 MiB root image, and
+64 MiB would only just do so.
+
+### Partition map
+
+The real map lives in the bootloader, which is not readable, so the emulator
+supplies its own via `mtdparts=` and both ends therefore agree. The *ordering*
+is pinned by the firmware itself:
+
+- `levelstar/update/update.py` writes `bootld.bin` to `/dev/mtdblock0` and
+  the kernel to partition 2 when there are more than three partitions.
+- `levelstar/update/app.py`, `installer/reg.py` and `sysmon/wireless.py` all
+  read the serial number and MAC out of `/dev/mtdblock1`.
+- `/etc/fstab` mounts `/dev/mtdblock3` as the root filesystem.
+
+So the shipped device has four partitions in the order
+bootloader, params, kernel, root:
+
+```
+mtdparts=onenand:1024k(bootloader),1024k(params),4096k(kernel),-(root)
+```
+
+Note the kernel's *compiled-in* command line says `root=/dev/mtdblock2`, which
+corresponds to the older three-partition Icon layout. `/etc/fstab` in this
+2.2.53 image says `mtdblock3`, so the shipped bootloader passes the
+four-partition map. We follow `/etc/fstab`.
+
+### The params partition
+
+`mtd1` is a small parameter block, read directly as bytes:
+
+| Offset | Length | Contents |
+|---|---|---|
+| 0 | 12 | ASCII serial number. A leading `1IBP1` makes the firmware report the manufacturer as "The American Printing House for the Blind"; anything else reads as "LevelStar". |
+| 16 | 6 | Wireless MAC. `sysmon/wireless.py` expects OUI `00:11:d6` or `00:50:c2:a4`, otherwise it invents one and caches it in `/etc/MAC.conf`. |
+
+## Board straps (GPIO)
+
+`everest_init()` reads **GPLR3** (`0x40e00100`, GPIO 96–127) once and splits it
+into two straps:
+
+```
+board_id  = (GPLR3 >> 7) & 0xf                        -> GPIO 103,104,105,106
+keypad_id = ((GPLR3 >> 11) & 3) | ((GPLR3 & 1) << 3)  -> GPIO 107,108 and 96
+```
+
+Note that bit 2 of `keypad_id` has no GPIO behind it and can never be set.
+Both values are exported at `/proc/everest/board_id` and
+`/proc/everest/keypad_id`, and `sysmon/wireless.py` reads `board_id` at import
+time. `everest_init()` branches on `board_id > 1`, so the value is not
+cosmetic; the emulator defaults to 2 and exposes both as machine properties
+(`-M everest,board-id=N,keypad-id=N`) because the correct values for a specific
+unit are not recoverable from firmware alone.
+
+`everest_init()` also requests GPIOs 103–108 and 96 by name, and creates
+`/proc/everest` entries named `board_id`, `keypad_id`, `sd_card_present`,
+`bt_power`, `wifi_power`, `uart_enable` and `usb_wake`.
+
+### SD card detect
+
+The `/proc/everest/sd_card_present` handler at `0xc002e888` reads GPLR0 and
+returns `(GPLR0 >> 4) & 1`, so **card detect is GPIO 4**. Left at QEMU's default
+of 0 the MMC core believes a card is present and retries forever, flooding the
+console with `everest_power_mci` / `everest_power_off_mci`. The emulator drives
+it high for an empty slot. (GPIOs 95 and 19 are the MMC power-rail controls,
+toggled by the `everest_power_mci` helper at `0xc002e8bc`.)
+
+## Custom peripherals
+
+`everest_init()` registers platform devices named `ac97`, `battery`, `motor`
+and `mmc_spi`, plus the `onenand` device above. Their drivers announce
+themselves on boot:
+
+```
+Everest Keypad driver loadee.        <- sic, typo is in the firmware
+Everest battery driver loaded.
+Everest motor driver loaded.
+Everest IDE interface at 0xc48e0000  irq:155
+```
+
+- **Keypad** — a board-specific driver that registers input device
+  `everestkeypad/input0`, named "Everest keypad.". It appears to drive the
+  **PXA27x keypad controller (KPC) at `0x41500000`** rather than bit-banging
+  GPIOs: the literal `0x37dff800` written to that address decodes as a KPC
+  configuration for an automatically scanned 6-row by 8-column matrix, and a
+  sibling constant `0x3bdff800` sits in the driver's literal pool. That matters
+  because QEMU already models the PXA27x KPC, and `pxa270_init()` instantiates
+  it, so the driver probes successfully today — what is missing is only the
+  matrix keymap. Wiring `pxa27x_register_keypad()` with a recovered row/column
+  layout should therefore be enough to get real input, without writing a new
+  device model. That layout has not been recovered yet.
+
+  Above the driver, `/etc/StartShell` loads `/etc/everest.keymap.gz` with
+  `loadkeys`, so the Perkins-style keys reach the application as ordinary Linux
+  console keycodes, with braille chords assembled by the kernel's braille
+  keyboard support (`keyboard.brl_nbchords`, `keyboard.brl_timeout`). The
+  application's `KeyEvent` carries `(type, scancode, modifiers, character,
+  dots)`, where `dots` is the braille dot pattern. Userspace separately creates
+  an "Icon Virtual Keyboard Controller" through `uinput` for the docking
+  station keyboard.
+- **Battery** and **motor** (the vibration alert) are Everest-specific drivers.
+- **Audio** is a WM9713 codec on the PXA27x AC97 link — see below.
+- **Storage** — an internal drive on `pxa2xx-ide` (`ide-gd_mod`), mounted at
+  `/media/hdd` from `/dev/hda1`.
+
+The battery and motor are not modelled, and the keypad has no keymap registered;
+all three drivers load cleanly anyway, which is enough to reach userspace.
+
+## Audio: PXA27x AC97 + WM9713
+
+QEMU's PXA2xx model has an I2S unit but has never had an AC97 one, and there
+was no WM9713 model either, so `hw/audio/pxa2xx_ac97.c` adds both. This is not
+optional decoration on this machine: the entire user interface is spoken
+through Eloquence, so without audio the firmware boots mute.
+
+- Controller at `0x40500000`, interrupt 14.
+- DMA request lines, per Linux's `sound/soc/pxa/pxa2xx-ac97.c`: PCM out on
+  request 12, PCM in on 11, aux out 10, aux in 9, mic in 8.
+- Codec registers are reached through windows at `+0x200` (primary audio),
+  `+0x300` (primary modem), `+0x400` and `+0x500` (secondary); AC97 register
+  `n` appears at `window + (n >> 1) * 4`.
+- Reset handshake: Linux clears GCR entirely and then writes
+  `GCR_COLD_RST | GCR_WARM_RST`, and waits for `GSR_PCR` to indicate the primary
+  codec is ready. A read from a codec window must set `GSR_SDONE`, a write must
+  set `GSR_CDONE`; GSR is write-1-to-clear.
+- Only a primary audio codec answers. Leaving `GSR_SDONE` clear for the other
+  windows is how the driver learns nothing else is fitted.
+
+Success looks like this on the console:
+
+```
+WM9713/WM9714 SoC Audio Codec 0.15
+asoc: AC97 HiFi <-> pxa2xx-ac97 mapping ok
+asoc: AC97 Aux <-> pxa2xx-ac97-aux mapping ok
+ALSA device list:
+  #0: Everest (WM9713)
+```
+
+### A QEMU DMA quirk worth knowing
+
+Real hardware holds the AC97 DMA request at a *level* and the DMA engine
+samples it. QEMU's `pxa2xx-dma` instead latches request *edges*, and
+`pxa2xx_dma_request()` drops any edge that arrives before the guest has set
+`DRCMR_MAPVLD` for that channel — which is exactly when the controller first
+raises it, during codec bring-up. Nothing re-raises it afterwards, so the
+channel never starts and guest writes fail with `-EIO`. The controller
+therefore re-presents the request level on a 2 ms timer while the AC-link is
+up; once samples flow, the PCDR writes and the audio callback keep the line
+current and the timer merely idles.
+
+## Boot sequence
+
+```
+/etc/inittab  id:5:initdefault
+              si::sysinit:/etc/init.d/rcS
+              S:2345:respawn:/sbin/getty 115200 ttyS0
+              5:5:once:/etc/StartShell
+/etc/StartShell
+              PYTHONOPTIMIZE=2, ECIINI=/etc/eci.ini
+              loadkeys /etc/everest.keymap.gz
+              modprobe ide-gd_mod pxa2xx-ide uinput
+              python -m levelstar.sysmon.launcher
+              dbus-launch shell
+```
+
+Note that `getty` and the application share `ttyS0`, so on the emulator the
+login prompt and the application's own stdout interleave on the same console.
+Root has an empty password (`root::0:0:root:/home/root:/bin/sh`).
+
+## Known gaps
+
+- **RAM size and OneNAND capacity are assumptions**, not measurements; both are
+  supplied by a bootloader we cannot read.
+- **The partition sizes are ours.** Only the ordering is attested by firmware.
+- **There is no input path into the application yet.** The keypad driver binds
+  to QEMU's existing PXA27x KPC model but no matrix keymap is registered, so no
+  keys are delivered. The serial console reaches `getty`, not the application.
+- The battery and vibration motor are not modelled, so the battery reads absent.
+- `dbus-launch` fails because it tries to autolaunch via X11, so the launcher
+  logs `GConf Error: No D-BUS daemon running` in a loop. The firmware ships
+  `Xfbdev`/`Xfake`; a headless device presumably never needed a working session
+  bus, but this has not been traced.
+- Capture (microphone / line in) reads silence.
+- The `board_id` and `keypad_id` values a real unit straps are unknown.

@@ -1,0 +1,6 @@
+# Firmware bundles and anything unpacked from them are not ours to redistribute.
+build/
+*.lsi
+*.img
+*.bin
+*.wav
