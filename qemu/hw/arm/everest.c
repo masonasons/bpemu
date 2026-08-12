@@ -150,7 +150,10 @@
  * rather than reporting directly: pressing dot 3 alone emits an apostrophe,
  * which is what dot 3 means in braille.
  *
- * Column 7 and row 5 are unpopulated. Array 0, for reference, is a plain
+ * Column 7 is unpopulated. Row 5 exists only in array 2 (see below), which is
+ * what keypad-id selects and where space, shift and control live.
+ *
+ * Array 0, for reference, is a plain
  * telephone keypad with no braille keys:
  *
  *         col0        col1       col2  col3       col4      col5    col6
@@ -198,6 +201,25 @@
 #define EVEREST_KP_VOLDOWN    { 5, 3 }
 #define EVEREST_KP_VOLUP      { 6, 3 }
 #define EVEREST_KP_DOT6       { 0, 4 }
+/*
+ * Row 5 exists only in keycode array 2, which is why keypad-id defaults to a
+ * non-zero value: array 1 has no space bar, no shift and no control, so a
+ * great deal of text is simply untypeable on it.
+ *
+ * These three carry values in the same 0x600 range as the braille dots and it
+ * is tempting to read them as dots 7, 8 and a blank cell. They are not --
+ * injecting each and watching /dev/input shows what the driver really emits:
+ *
+ *     row5 col3  0x606 -> KEY_LEFTSHIFT
+ *     row5 col4  0x607 -> KEY_SPACE
+ *     row5 col2  0x608 -> KEY_LEFTCTRL
+ *
+ * so the encoding order is not the obvious one, and this keypad is six-dot
+ * braille plus modifiers rather than eight-dot.
+ */
+#define EVEREST_KP_LEFTCTRL   { 2, 5 }
+#define EVEREST_KP_LEFTSHIFT  { 3, 5 }
+#define EVEREST_KP_SPACE      { 4, 5 }
 #define EVEREST_KP_DOT5       { 1, 4 }
 #define EVEREST_KP_5          { 2, 4 }
 #define EVEREST_KP_6          { 3, 4 }
@@ -249,6 +271,10 @@ static const struct keymap everest_keymap[0x100] = {
     [0x24]        = EVEREST_KP_DOT4,       /* J */
     [0x25]        = EVEREST_KP_DOT5,       /* K */
     [0x26]        = EVEREST_KP_DOT6,       /* L */
+    /* Space, shift and control map to the obvious host keys. */
+    [0x39]        = EVEREST_KP_SPACE,      /* Space      */
+    [0x2a]        = EVEREST_KP_LEFTSHIFT,  /* Left Shift */
+    [0x1d]        = EVEREST_KP_LEFTCTRL,   /* Left Ctrl  */
 
     /* Navigation. */
     [0x1c]        = EVEREST_KP_OK,         /* Enter  */
@@ -560,7 +586,12 @@ static void everest_machine_instance_init(Object *obj)
     EverestMachineState *ems = EVEREST_MACHINE(obj);
 
     ems->board_id = 2;
-    ems->keypad_id = 0;
+    /*
+     * Non-zero selects keycode array 2, the 8-dot braille layout with a space
+     * key. Array 1, which keypad-id=0 selects, has only dots 1-6 and no way to
+     * type a space at all.
+     */
+    ems->keypad_id = 1;
 }
 
 static const TypeInfo everest_machine_types[] = {

@@ -173,6 +173,8 @@ navigation keys, and **six braille dot keys**. Host keys map onto it as:
 |---|---|
 | `1`–`9`, `0` (number row or numpad) | digit keys |
 | `S` `D` `F` / `J` `K` `L` | braille dots 3 2 1 / 4 5 6 (Perkins home row) |
+| Space | space |
+| Left Shift / Left Ctrl | shift / control |
 | Enter / Esc | OK / Cancel |
 | Arrow keys | Up / Down / Left / Right |
 | F1 F2 F3 F4 | Help / Menu / Info / Select |
@@ -180,9 +182,13 @@ navigation keys, and **six braille dot keys**. Host keys map onto it as:
 | PgUp / PgDn / `M` / `R` | Volume up / down / Mute / Record |
 | Numpad `*` / `.` | `*` / `#` |
 
-Chords are assembled by the guest kernel's braille support, so pressing dot
-keys together types braille: dot 1 alone produces `a`, dot 3 alone produces an
-apostrophe.
+Chords are assembled by the driver, so pressing dot keys together types
+braille: dot 1 alone produces `a`, dot 3 alone produces an apostrophe.
+
+Space, shift and control live in a sixth matrix row that only exists in the
+keypad's second keycode array, which is why `keypad-id` defaults to 1. Select
+`keypad-id=0` and you get the first array, which has no space bar, no shift and
+no control at all.
 
 **Type into the QEMU window, not the terminal.** `run.sh` / `run.ps1` open an
 SDL window that stays black — the device has no screen, so the guest never

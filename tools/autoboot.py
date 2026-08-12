@@ -169,7 +169,9 @@ def main():
                          "sysmon applet crash-loops and the UI never starts")
     ap.add_argument("--ram", default="64")
     ap.add_argument("--board-id", default="2")
-    ap.add_argument("--keypad-id", default="0")
+    ap.add_argument("--keypad-id", default="1",
+                    help="1 selects the 8-dot braille keycode array, which is "
+                         "the only one with a space key")
     ap.add_argument("--audio", default="none",
                     help="value for -audio, e.g. 'driver=wav,path=/tmp/o.wav'")
     ap.add_argument("--log", default=None, help="write raw console output here")

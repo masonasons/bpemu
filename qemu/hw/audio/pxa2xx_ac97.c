@@ -99,6 +99,24 @@
 #define AC97_VENDOR_ID1         0x7c
 #define AC97_VENDOR_ID2         0x7e
 
+/*
+ * WM9713 auxiliary ADC ("digitiser"). The board's battery driver reads the
+ * pack voltage through it: it writes DIG1 with the poll bit and a channel
+ * select, spins until the poll bit clears, then takes the low 12 bits of the
+ * readback register. With no model behind it the poll bit never cleared, the
+ * driver gave up, and /proc/everest/battery read back "Read timeout" -- which
+ * made sysmon's pm.check() throw a ValueError on every timer tick trying to
+ * parse it as an integer.
+ *
+ * One LSB is one millivolt: the firmware compares the value straight against
+ * 3400mV (warn) and 3000mV (emergency suspend), and a 12-bit range tops out at
+ * 4095, which is exactly a single-cell lithium pack.
+ */
+#define WM9713_DIG1             0x74
+#define WM9713_DIG1_POLL        0x0200
+#define WM9713_DIGITISER_RD     0x7a
+#define WM9713_ADC_MASK         0x0fff
+
 #define WM9713_NUM_REGS 64      /* 0x00..0x7e, 16 bits apiece */
 
 /*
@@ -175,6 +193,7 @@ struct PXA2xxAC97State {
 
     QEMUTimer *dma_refresh;
     bool debug;             /* BPEMU_AC97_DEBUG: report burst sizes */
+    uint32_t battery_mv;    /* what the auxiliary ADC reports */
 };
 
 /*
@@ -498,6 +517,19 @@ static void pxa2xx_ac97_codec_write(PXA2xxAC97State *s, unsigned reg,
     case AC97_VENDOR_ID1:
     case AC97_VENDOR_ID2:
         return;             /* read-only */
+    case WM9713_DIG1:
+        /*
+         * Starting an ADC conversion. Real silicon takes a few AC97 frames;
+         * there is nothing to be gained by making the guest wait, so complete
+         * it at once -- publish the result and hand back a cleared poll bit so
+         * the driver's wait loop exits on its first read.
+         */
+        if (value & WM9713_DIG1_POLL) {
+            s->codec[WM9713_DIGITISER_RD >> 1] =
+                s->battery_mv & WM9713_ADC_MASK;
+            value &= ~WM9713_DIG1_POLL;
+        }
+        break;
     }
 
     s->codec[reg] = value;
@@ -822,6 +854,11 @@ static const VMStateDescription vmstate_pxa2xx_ac97 = {
 
 static Property pxa2xx_ac97_properties[] = {
     DEFINE_AUDIO_PROPERTIES(PXA2xxAC97State, card),
+    /*
+     * 4000mV is a healthy, nearly full single-cell pack: comfortably above the
+     * firmware's 3400mV warning and 3000mV emergency-suspend thresholds.
+     */
+    DEFINE_PROP_UINT32("battery-mv", PXA2xxAC97State, battery_mv, 4000),
     DEFINE_PROP_END_OF_LIST(),
 };
 

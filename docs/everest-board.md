@@ -202,6 +202,27 @@ Everest IDE interface at 0xc48e0000  irq:155
   which the driver detects by testing bit `0x200` and routes separately — these
   are the braille dots, i.e. chorded braille entry on the twelve-key pad.
 
+  **Array 2** is array 1 plus a sixth row, and is selected whenever `keypad_id`
+  is non-zero. That row matters far more than its size suggests: it holds
+  space, shift and control, none of which appear anywhere in arrays 0 or 1.
+  Pick the wrong variant and the machine cannot type a space or a capital
+  letter, which is why the board defaults `keypad-id` to 1.
+
+  Those three carry `0x600`-range values just like the dots, so it is natural
+  to read them as dots 7 and 8 plus a blank cell — the more so because the
+  application defines `KEY_BRAILLE_DOT1..DOT8` followed immediately by
+  `KEY_BRAILLE_SPACE`. That reading is wrong. Injecting each key and watching
+  `/dev/input/event0` shows what the driver really emits:
+
+  | Matrix | Value | Emits |
+  |---|---|---|
+  | row5 col3 | `0x606` | `KEY_LEFTSHIFT` |
+  | row5 col4 | `0x607` | `KEY_SPACE` |
+  | row5 col2 | `0x608` | `KEY_LEFTCTRL` |
+
+  So the encoding order is not the obvious one, and this keypad is six-dot
+  braille plus modifiers rather than eight-dot.
+
 ### The key lock switch gates the entire keypad (GPIO 93)
 
 Wiring the matrix up via `pxa27x_register_keypad()` is necessary but not
