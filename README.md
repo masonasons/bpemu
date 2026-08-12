@@ -184,6 +184,13 @@ Chords are assembled by the guest kernel's braille support, so pressing dot
 keys together types braille: dot 1 alone produces `a`, dot 3 alone produces an
 apostrophe.
 
+**Type into the QEMU window, not the terminal.** `run.sh` / `run.ps1` open an
+SDL window that stays black — the device has no screen, so the guest never
+initialises a framebuffer — but that window is what captures keystrokes and
+feeds them to the emulated keypad. The terminal you launched from is the
+device's *serial console* (a root shell), which is a different input path.
+Pass `-Display none` / `DISPLAY_BACKEND=none` for a headless run.
+
 **The key lock switch must be released or the keypad is dead** — that is real
 device behaviour, not an emulator quirk, and it silently drops every keypress.
 The board releases it by default; `-M everest,key-lock=on` engages it.

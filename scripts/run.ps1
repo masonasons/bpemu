@@ -11,6 +11,13 @@
     implements over WASAPI. 'sdl' goes through SDL2, whose Windows backend is
     WASAPI directly and usually has lower latency. 'none' boots silently.
     You can also pass a full spec, e.g. 'driver=wav,path=C:\out.wav'.
+
+.PARAMETER Display
+    QEMU display backend, 'sdl' by default. The window it opens stays black --
+    the device has no screen, so the guest never initialises a framebuffer --
+    but it is what captures your keystrokes and feeds them to the emulated
+    keypad. Give that window focus to type on the device. Pass 'none' for a
+    headless run driven purely from the serial console.
 #>
 [CmdletBinding()]
 param(
@@ -21,6 +28,7 @@ param(
     [int]$BoardId = 2,
     [int]$KeypadId = 0,
     [string]$AudioDrv = 'dsound',
+    [string]$Display = 'sdl',
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
@@ -48,7 +56,7 @@ $qemuArgs = @(
     '-drive', "if=mtd,format=raw,file=$Flash"
     '-audio', $AudioDrv
     '-serial', 'mon:stdio'
-    '-display', 'none'
+    '-display', $Display
 )
 if ($ExtraArgs) { $qemuArgs += $ExtraArgs }
 

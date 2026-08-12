@@ -24,6 +24,10 @@ RAM="${RAM:-64}"
 # "-audio <driver>" (no model=) is what establishes one. Override with
 # AUDIO_DRV=alsa, or AUDIO_DRV=none to boot silently.
 AUDIO_DRV="${AUDIO_DRV:-$DEFAULT_AUDIO}"
+# The window this opens stays black -- the device has no screen -- but it is
+# what captures keystrokes for the emulated keypad. DISPLAY_BACKEND=none for a
+# headless run driven only from the serial console.
+DISPLAY_BACKEND="${DISPLAY_BACKEND:-sdl}"
 BOARD_ID="${BOARD_ID:-2}"
 KEYPAD_ID="${KEYPAD_ID:-0}"
 # The stock kernel's built-in cmdline is
@@ -45,5 +49,5 @@ exec "$QEMU" \
     -drive if=mtd,format=raw,file="$FLASH" \
     -audio "$AUDIO_DRV" \
     -serial mon:stdio \
-    -display none \
+    -display "$DISPLAY_BACKEND" \
     "$@"
