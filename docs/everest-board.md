@@ -309,6 +309,49 @@ ALSA device list:
   #0: Everest (WM9713)
 ```
 
+### The device speaks through the Aux DAC, not the HiFi one
+
+This is the single least guessable thing about the machine's audio, and it cost
+a long debugging session, so it is worth stating plainly.
+
+The WM9713 has **two** DACs, and ALSA exposes them as two PCM devices:
+
+```
+card 0: Everest [Everest], device 0: AC97 HiFi     -> PCDR, DMA request 12
+card 0: Everest [Everest], device 1: AC97 Aux      -> MODR, DMA request 10
+```
+
+GStreamer sound effects (`.ogg`, `.wav`) play through the stereo **HiFi** DAC.
+**Eloquence speech plays through the mono Aux DAC**, which is what that DAC is
+for. Model only the HiFi path -- as this board did at first, discarding `MODR`
+with a `break;` -- and the result is a machine that plays every sound effect
+perfectly while never speaking a word. That symptom looks exactly like a broken
+speech engine, and it is not.
+
+Two measurements settle it quickly if it ever regresses:
+
+- Play the same clip to `plughw:0,0` and then `plughw:0,1`. If only one
+  playback's worth reaches the host, the Aux path is missing.
+- Call Eloquence directly with `ctypes` (`eciNew`, `eciSetOutputFilename`,
+  `eciAddText`, `eciSynthesize`). It reports version 6.1.0.0 and writes a wav
+  quite happily, which rules the engine out in one step. There is no licence
+  check standing in the way, despite `libeci.so` exporting `eciRequestLicense`.
+
+Each 32-bit write to `MODR` carries **one** mono sample in its low half. It is
+tempting to read it as two packed S16 samples, since Linux configures that DMA
+with `DCMD_WIDTH4` over what looks like a linear mono buffer, but that doubles
+the stream -- measured as 293936 samples for a clip that should be about
+145440.
+
+Rates are not the interesting part, contrary to first instinct: VRA is enabled
+(`AC97_EXTENDED_STATUS` reads `0x0411`), the HiFi voice reopens itself at
+11025Hz for speech-rate content and times correctly, and the Aux path's rate
+register genuinely reads 48000 because ALSA resamples before handing samples
+over.
+
+Set `BPEMU_AC97_DEBUG=1` to have the model report the sample count and rate of
+each playback burst, which is the fastest way to catch this class of bug.
+
 ### A QEMU DMA quirk worth knowing
 
 Real hardware holds the AC97 DMA request at a *level* and the DMA engine
