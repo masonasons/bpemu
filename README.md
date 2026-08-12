@@ -40,7 +40,7 @@ run as they were flashed.
 | Python application launcher starts | ✅ |
 | Serial console, networking, SSH, Samba, Bluetooth stack | ✅ as far as the firmware takes them |
 | Native Windows build (no WSL) | ✅ self-contained `qemu-system-arm.exe` |
-| Keypad matrix recovered and wired | ⚠️ interrupts reach the guest, events do not |
+| Keypad input, including chorded braille | ✅ see [Keys](#keys) |
 | Battery, vibration motor | ❌ drivers load, hardware unmodelled |
 | Audio capture | ❌ reads silence |
 
@@ -164,6 +164,30 @@ if you want it flushed.
 Note the guest is BusyBox 1.2.1 from 2010; its `head` has no `-N` form and many
 other options you would reach for are absent.
 
+## Keys
+
+The device has a 6×7 keypad matrix — a telephone keypad, function and
+navigation keys, and **six braille dot keys**. Host keys map onto it as:
+
+| Host key | Device key |
+|---|---|
+| `1`–`9`, `0` (number row or numpad) | digit keys |
+| `S` `D` `F` / `J` `K` `L` | braille dots 3 2 1 / 4 5 6 (Perkins home row) |
+| Enter / Esc | OK / Cancel |
+| Arrow keys | Up / Down / Left / Right |
+| F1 F2 F3 F4 | Help / Menu / Info / Select |
+| F5 F6 F7 | Prog1 / Prog2 / Program |
+| PgUp / PgDn / `M` / `R` | Volume up / down / Mute / Record |
+| Numpad `*` / `.` | `*` / `#` |
+
+Chords are assembled by the guest kernel's braille support, so pressing dot
+keys together types braille: dot 1 alone produces `a`, dot 3 alone produces an
+apostrophe.
+
+**The key lock switch must be released or the keypad is dead** — that is real
+device behaviour, not an emulator quirk, and it silently drops every keypress.
+The board releases it by default; `-M everest,key-lock=on` engages it.
+
 ## Machine options
 
 ```
@@ -204,18 +228,13 @@ deliberate and is the main long-term maintenance risk for this project.
 
 The honest ones, in rough order of how much they matter:
 
-- **You cannot yet drive the UI.** The keypad matrix *is* recovered and wired
-  up (a 6×8 auto-scanned PXA27x matrix; see the docs for the full table), and
-  injected keys demonstrably reach the guest — the keypad interrupt count rises
-  by exactly two per keypress. But nothing arrives at `/dev/input/event0` yet,
-  so the serial console still gets you a shell rather than the app. The docs
-  record exactly how far the signal gets, and which hypothesis was tested and
-  ruled out.
+- **The application's own behaviour is largely unexplored.** Keys now reach it,
+  but `dbus-launch` fails (it tries to autolaunch through X11), so the launcher
+  repeats `GConf Error: No D-BUS daemon running`. How much of the UI works in
+  practice has not been characterised.
 - **RAM size, flash capacity and partition sizes are informed assumptions.**
   They come from a bootloader we cannot read. Partition *ordering* is attested
   by the firmware itself. See the docs for the derivations.
-- `dbus-launch` fails (it tries to autolaunch through X11), so the launcher
-  repeats `GConf Error: No D-BUS daemon running`. Not yet traced.
 - Audio capture returns silence; battery reads absent; the vibration motor goes
   nowhere.
 - The `.so` extension modules in the firmware are ARM binaries and stay that

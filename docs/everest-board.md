@@ -202,63 +202,83 @@ Everest IDE interface at 0xc48e0000  irq:155
   which the driver detects by testing bit `0x200` and routes separately — these
   are the braille dots, i.e. chorded braille entry on the twelve-key pad.
 
-### Input still does not reach userspace — where it stops
+### The key lock switch gates the entire keypad (GPIO 93)
 
-Wiring the matrix up via `pxa27x_register_keypad()` is necessary but **not
-sufficient**, and this is the main outstanding gap.
+Wiring the matrix up via `pxa27x_register_keypad()` is necessary but not
+sufficient, and the missing piece was not in the keypad at all.
 
-What is established:
+The keypad driver's per-key routine at `0xc01e36e8` opens with:
 
-- Injected keys reach the guest. `/proc/interrupts` shows the `Keypad` count on
-  IRQ 4 climbing by exactly **two per keypress** (press and release), from 0 to
-  10 over five keys, and 42 over twenty-one keys.
-- The driver's interrupt handler at `0xc01e3ad8` reads `KPC (0x00)`,
-  `KPAS (0x20)` and `KPASMKP0..3 (0x28/0x30/0x38/0x40)` — precisely the
-  registers and offsets QEMU models — and XORs each against a saved copy at
-  `dev+0x98..0xa4` to find changed bits, dispatching changed column pairs via
-  `0xc01e3a94` (which splits the low byte and bits 16..23 into two columns,
-  matching QEMU's `1 << (row + 16 * (col % 2))` layout).
-- Nothing arrives at `/dev/input/event0`, for any of the twenty-one distinct
-  matrix positions tried.
+```
+ldrb lr, [r0, #52]     ; a gating byte in the driver's private state
+cmp  lr, #0
+bne  0xc01e39dc        ; non-zero -> return immediately, report nothing
+```
 
-So the failure is downstream of the register read, inside the per-key path
-around `0xc01e3700`, which consults `jiffies` (`0xc03d88fc`) against saved
-timestamps and a threshold (`0xc040e97c`, `0xc03f2c58`) and keeps per-key state
-at `dev + 0xa8 + index*4`. That looks like a software debounce, which suggested
-that the driver needs to see a key still pressed on a *later* scan — real
-PXA27x auto-scan hardware re-interrupts continuously while a key is down,
-whereas QEMU's model only fires on state changes.
+The probe initialises that byte to **2** — neither of its two valid values —
+and then samples the key lock switch (`0xc0017354` calls the same worker the
+switch's interrupt handler uses), which derives it from GPLR2 bit 29:
 
-**That hypothesis was tested and rejected.** Patching
-`hw/input/pxa2xx_keypad.c` to re-raise the matrix interrupt every 10 ms while a
-key is held drove the interrupt count to 183 for three keys — the rescans were
-clearly happening — and still produced no input events. The patch was reverted
-rather than shipped: it changes behaviour for every other PXA board in QEMU
-(mainstone, spitz, z2, tosa) and bought nothing here.
+```
+tst r3, #0x20000000    ; GPIO 93
+movne r4, #0           ; pin HIGH -> 0, keypad enabled
+moveq r4, #1           ; pin LOW  -> 1, keys locked
+strb r4, [r5, #52]
+```
 
-Next things worth trying: decode the per-key path properly (note `0xc01e3700`
-is mid-function, not an entry point, so its prologue and real arguments are
-still unknown); check whether the driver expects `KPAS` fields QEMU leaves
-constant, in particular the row/column fields that QEMU only fills when exactly
-one key is pressed; and check `KPKDI`, the key-debounce-interval register,
-which QEMU stores but never acts on.
+So **GPIO 93 must be high or the keypad is dead**. Left at QEMU's default of
+low, every keypress was silently dropped: interrupts arrived (the `Keypad`
+count on IRQ 4 rose by exactly two per press) and the driver read the matrix
+correctly, but nothing ever reached `/dev/input`. The board now drives GPIO 93
+high, with a `key-lock=on` machine property to engage the switch.
 
-  Above the driver, `/etc/StartShell` loads `/etc/everest.keymap.gz` with
-  `loadkeys`, so the Perkins-style keys reach the application as ordinary Linux
-  console keycodes, with braille chords assembled by the kernel's braille
-  keyboard support (`keyboard.brl_nbchords`, `keyboard.brl_timeout`). The
-  application's `KeyEvent` carries `(type, scancode, modifiers, character,
-  dots)`, where `dots` is the braille dot pattern. Userspace separately creates
-  an "Icon Virtual Keyboard Controller" through `uinput` for the docking
-  station keyboard.
-- **Battery** and **motor** (the vibration alert) are Everest-specific drivers.
-- **Audio** is a WM9713 codec on the PXA27x AC97 link — see below.
-- **Storage** — an internal drive on `pxa2xx-ide` (`ide-gd_mod`), mounted at
-  `/media/hdd` from `/dev/hda1`.
+The GPIO numbering is self-consistent: `/proc/interrupts` lists IRQ 68 as
+"MMC card detect", and 68 − 64 = GPIO 4, which independently matches the
+`sd_card_present` handler reading `GPLR0 >> 4`. On the same base, IRQ 157
+("key lock") is GPIO 93.
 
-The battery and motor are not modelled, and the keypad has no keymap registered;
-all three drivers load cleanly anyway, which is enough to reach userspace.
+A rejected hypothesis, recorded so nobody repeats it: the per-key routine
+consults `jiffies` and per-key state, which looks like a software debounce, so
+it seemed plausible that the driver needed to see a key still pressed on a
+*later* scan — real PXA27x auto-scan hardware re-interrupts continuously while
+a key is held, whereas QEMU's model only fires on state changes. Patching
+`hw/input/pxa2xx_keypad.c` to rescan every 10 ms drove the interrupt count to
+183 for three keys and still produced no events. That patch was reverted.
 
+### Which keycode array is live
+
+Injecting a key at matrix position 3 reports **362** (`KEY_PROGRAM`), which is
+`array1[3]`, not `array0[3]` (`BTN_1`). So the running firmware selects
+**array 1**, even though array 0 is the boot default and the only array whose
+keycodes the probe declares to the input core.
+
+Array 1 is also the fuller layout, and the only one containing the six braille
+dots — so it is very likely the real physical keypad:
+
+|      | col0 | col1 | col2 | col3 | col4 | col5 | col6 |
+|------|------|------|------|------|------|------|------|
+| row0 | `PROG1` | `DOT3` | `INFO` | `PROGRAM` | `PROG2` | `HELP` | `CANCEL` |
+| row1 | `KPDOT` | `DOT2` | `BTN_LEFT` | `UP` | `SELECT` | `DOWN` | `BTN_RIGHT` |
+| row2 | `BTN_0` | `DOT1` | `BTN_1` | `BTN_2` | `BTN_3` | `OK` | `MENU` |
+| row3 | `KPASTERISK` | `DOT4` | `BTN_4` | `RECORD` | `MUTE` | `VOLUMEDOWN` | `VOLUMEUP` |
+| row4 | `DOT6` | `DOT5` | `BTN_5` | `BTN_6` | `BTN_7` | `BTN_8` | `BTN_9` |
+
+The mapping was confirmed end to end by injecting keys and decoding the
+resulting `input_event` structs — six positions, six exact matches:
+
+| Matrix index | Expected `array1[i]` | Reported |
+|---|---|---|
+| 3 | `PROGRAM` (362) | 362 |
+| 2 | `INFO` (358) | 358 |
+| 1 | `DOT3` (0x602) | **40 — apostrophe** |
+| 8 | `KPDOT` (83) | 83 |
+| 4 | `PROG2` (149) | 149 |
+| 29 | `VOLUMEDOWN` (114) | 114 |
+
+The dot-3 result is the most telling. Dot keys carry keycodes in the `0x600`
+range, which the driver detects by testing bit `0x200` and routes into the
+kernel's braille chord assembler rather than reporting directly — and dot 3
+alone *is* an apostrophe in braille. Chorded braille entry works.
 ## Audio: PXA27x AC97 + WM9713
 
 QEMU's PXA2xx model has an I2S unit but has never had an AC97 one, and there
@@ -325,9 +345,6 @@ Root has an empty password (`root::0:0:root:/home/root:/bin/sh`).
 - **RAM size and OneNAND capacity are assumptions**, not measurements; both are
   supplied by a bootloader we cannot read.
 - **The partition sizes are ours.** Only the ordering is attested by firmware.
-- **There is no input path into the application yet.** The keypad driver binds
-  to QEMU's existing PXA27x KPC model but no matrix keymap is registered, so no
-  keys are delivered. The serial console reaches `getty`, not the application.
 - The battery and vibration motor are not modelled, so the battery reads absent.
 - `dbus-launch` fails because it tries to autolaunch via X11, so the launcher
   logs `GConf Error: No D-BUS daemon running` in a loop. The firmware ships

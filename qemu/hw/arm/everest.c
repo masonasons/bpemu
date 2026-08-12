@@ -77,6 +77,23 @@
 #define EVEREST_GPIO_SD_CARD_DETECT    4
 
 /*
+ * Key lock switch, on GPIO 93 (GPLR2 bit 29; its interrupt is IRQ 157, which
+ * /proc/interrupts names "key lock").
+ *
+ * This one gates the whole keypad. The keypad driver keeps a byte of state that
+ * its per-key handler checks first and, if non-zero, returns immediately
+ * without reporting anything. The probe initialises that byte to 2 -- neither
+ * of the two valid values -- and then samples the switch, deriving
+ *
+ *     locked = (GPLR2 & (1 << 29)) ? 0 : 1
+ *
+ * so the pin must be *high* for the keypad to work. Left at QEMU's default of
+ * low, every keypress is silently dropped: interrupts arrive and the driver
+ * reads the matrix correctly, but nothing ever reaches /dev/input.
+ */
+#define EVEREST_GPIO_KEY_LOCK         93
+
+/*
  * Keypad matrix.
  *
  * The board's keypad driver programs the PXA27x keypad controller with
@@ -87,62 +104,82 @@
  *     keycodes[variant * 48 + row * 8 + col]
  *
  * with the base array at 0xc03f2dac. The variant is selected at runtime by
- * writing '0' or '1' to a sysfs node -- variant 0 at boot, and the driver only
- * ever declares variant 0's keycodes to the input core, so that is the table
- * modelled here. (Variant 1 remaps the same physical keys to values in the
- * 0x600 range, which the driver detects by testing bit 0x200 and handles
- * separately: those are the braille dots, i.e. chorded braille entry on the
- * twelve-key pad. Guests can still switch to it themselves; the matrix
- * positions below do not change.)
+ * writing '0' or '1' to a sysfs node; array 0 is the boot default and the only
+ * one whose keycodes the probe declares to the input core.
  *
- * Decoded, variant 0 is a telephone keypad plus navigation and media keys:
+ * The running firmware selects **array 1**, which was confirmed empirically:
+ * injecting a key at matrix position 3 reports 362 (KEY_PROGRAM), which is
+ * array1[3], not array0[3] (BTN_1). Array 1 is also the fuller layout -- it is
+ * the only one containing the six braille dots -- so it is what the host keys
+ * below are mapped against:
  *
- *          col0        col1    col2    col3       col4      col5      col6
- *   row0   KPASTERISK  BTN_7   BTN_4   BTN_1      OK        INFO      PROG1
- *   row1   BTN_0       BTN_8   BTN_5   BTN_2      MENU      SELECT    DOWN
- *   row2   -           -       -       BTN_RIGHT  BTN_LEFT  UP        PROGRAM
- *   row3   KPDOT       BTN_9   BTN_6   BTN_3      CANCEL    HELP      PROG2
- *   row4   VOLUMEUP    VOLUMEDOWN MUTE RECORD     -         -         -
- *   row5   -           -       -       -          -         -         -
+ *         col0        col1  col2      col3     col4   col5        col6
+ *   row0  PROG1       DOT3  INFO      PROGRAM  PROG2  HELP        CANCEL
+ *   row1  KPDOT       DOT2  BTN_LEFT  UP       SELECT DOWN        BTN_RIGHT
+ *   row2  BTN_0       DOT1  BTN_1     BTN_2    BTN_3  OK          MENU
+ *   row3  KPASTERISK  DOT4  BTN_4     RECORD   MUTE   VOLUMEDOWN  VOLUMEUP
+ *   row4  DOT6        DOT5  BTN_5     BTN_6    BTN_7  BTN_8       BTN_9
+ *   row5  -           -     -         -        -      -           -
  *
- * BTN_0..BTN_9 are the digit keys; column 7 and row 5 are unpopulated. The
- * host-key assignment below is our choice, not the device's -- the hardware
- * has no PC keyboard.
+ * The dot keys carry keycodes in the 0x600 range, which the driver detects by
+ * testing bit 0x200 and routes into the kernel's braille chord assembler
+ * rather than reporting directly: pressing dot 3 alone emits an apostrophe,
+ * which is what dot 3 means in braille.
+ *
+ * Column 7 and row 5 are unpopulated. Array 0, for reference, is a plain
+ * telephone keypad with no braille keys:
+ *
+ *         col0        col1       col2  col3       col4      col5    col6
+ *   row0  KPASTERISK  BTN_7      BTN_4 BTN_1      OK        INFO    PROG1
+ *   row1  BTN_0       BTN_8      BTN_5 BTN_2      MENU      SELECT  DOWN
+ *   row2  -           -          -     BTN_RIGHT  BTN_LEFT  UP      PROGRAM
+ *   row3  KPDOT       BTN_9      BTN_6 BTN_3      CANCEL    HELP    PROG2
+ *   row4  VOLUMEUP    VOLUMEDOWN MUTE  RECORD     -         -       -
+ *
+ * The host-key assignment below is our choice, not the device's -- the
+ * hardware has no PC keyboard. Braille dots use the Perkins home-row
+ * convention: S/D/F are dots 3/2/1 and J/K/L are dots 4/5/6.
  */
 /*
  * Careful: QEMU's struct keymap is { int8_t column; int8_t row; } -- column
  * first -- so these initialisers are written (col, row), the opposite way round
  * from the (row, col) table above.
  */
-#define EVEREST_KP_ASTERISK   { 0, 0 }
-#define EVEREST_KP_7          { 1, 0 }
-#define EVEREST_KP_4          { 2, 0 }
-#define EVEREST_KP_1          { 3, 0 }
-#define EVEREST_KP_OK         { 4, 0 }
-#define EVEREST_KP_INFO       { 5, 0 }
-#define EVEREST_KP_PROG1      { 6, 0 }
-#define EVEREST_KP_0          { 0, 1 }
-#define EVEREST_KP_8          { 1, 1 }
-#define EVEREST_KP_5          { 2, 1 }
-#define EVEREST_KP_2          { 3, 1 }
-#define EVEREST_KP_MENU       { 4, 1 }
-#define EVEREST_KP_SELECT     { 5, 1 }
-#define EVEREST_KP_DOWN       { 6, 1 }
-#define EVEREST_KP_RIGHT      { 3, 2 }
-#define EVEREST_KP_LEFT       { 4, 2 }
-#define EVEREST_KP_UP         { 5, 2 }
-#define EVEREST_KP_PROGRAM    { 6, 2 }
-#define EVEREST_KP_HASH       { 0, 3 }
-#define EVEREST_KP_9          { 1, 3 }
-#define EVEREST_KP_6          { 2, 3 }
-#define EVEREST_KP_3          { 3, 3 }
-#define EVEREST_KP_CANCEL     { 4, 3 }
-#define EVEREST_KP_HELP       { 5, 3 }
-#define EVEREST_KP_PROG2      { 6, 3 }
-#define EVEREST_KP_VOLUP      { 0, 4 }
-#define EVEREST_KP_VOLDOWN    { 1, 4 }
-#define EVEREST_KP_MUTE       { 2, 4 }
-#define EVEREST_KP_RECORD     { 3, 4 }
+#define EVEREST_KP_PROG1      { 0, 0 }
+#define EVEREST_KP_DOT3       { 1, 0 }
+#define EVEREST_KP_INFO       { 2, 0 }
+#define EVEREST_KP_PROGRAM    { 3, 0 }
+#define EVEREST_KP_PROG2      { 4, 0 }
+#define EVEREST_KP_HELP       { 5, 0 }
+#define EVEREST_KP_CANCEL     { 6, 0 }
+#define EVEREST_KP_HASH       { 0, 1 }
+#define EVEREST_KP_DOT2       { 1, 1 }
+#define EVEREST_KP_LEFT       { 2, 1 }
+#define EVEREST_KP_UP         { 3, 1 }
+#define EVEREST_KP_SELECT     { 4, 1 }
+#define EVEREST_KP_DOWN       { 5, 1 }
+#define EVEREST_KP_RIGHT      { 6, 1 }
+#define EVEREST_KP_0          { 0, 2 }
+#define EVEREST_KP_DOT1       { 1, 2 }
+#define EVEREST_KP_1          { 2, 2 }
+#define EVEREST_KP_2          { 3, 2 }
+#define EVEREST_KP_3          { 4, 2 }
+#define EVEREST_KP_OK         { 5, 2 }
+#define EVEREST_KP_MENU       { 6, 2 }
+#define EVEREST_KP_ASTERISK   { 0, 3 }
+#define EVEREST_KP_DOT4       { 1, 3 }
+#define EVEREST_KP_4          { 2, 3 }
+#define EVEREST_KP_RECORD     { 3, 3 }
+#define EVEREST_KP_MUTE       { 4, 3 }
+#define EVEREST_KP_VOLDOWN    { 5, 3 }
+#define EVEREST_KP_VOLUP      { 6, 3 }
+#define EVEREST_KP_DOT6       { 0, 4 }
+#define EVEREST_KP_DOT5       { 1, 4 }
+#define EVEREST_KP_5          { 2, 4 }
+#define EVEREST_KP_6          { 3, 4 }
+#define EVEREST_KP_7          { 4, 4 }
+#define EVEREST_KP_8          { 5, 4 }
+#define EVEREST_KP_9          { 6, 4 }
 
 /*
  * Host PC set-1 scancode -> matrix position. QEMU's PXA keypad indexes this by
@@ -176,6 +213,18 @@ static const struct keymap everest_keymap[0x100] = {
     [0x52]        = EVEREST_KP_0,
     [0x37]        = EVEREST_KP_ASTERISK,   /* keypad *      */
     [0x53]        = EVEREST_KP_HASH,       /* keypad . as # */
+
+    /*
+     * Braille dots, Perkins style: left hand S/D/F on dots 3/2/1, right hand
+     * J/K/L on dots 4/5/6. Chords are assembled by the guest kernel's braille
+     * support, so pressing them together types braille.
+     */
+    [0x1f]        = EVEREST_KP_DOT3,       /* S */
+    [0x20]        = EVEREST_KP_DOT2,       /* D */
+    [0x21]        = EVEREST_KP_DOT1,       /* F */
+    [0x24]        = EVEREST_KP_DOT4,       /* J */
+    [0x25]        = EVEREST_KP_DOT5,       /* K */
+    [0x26]        = EVEREST_KP_DOT6,       /* L */
 
     /* Navigation. */
     [0x1c]        = EVEREST_KP_OK,         /* Enter  */
@@ -217,6 +266,7 @@ struct EverestMachineState {
 
     uint32_t board_id;
     uint32_t keypad_id;
+    bool key_lock;
 };
 
 static struct arm_boot_info everest_binfo = {
@@ -234,6 +284,7 @@ typedef struct EverestStraps {
     DeviceState *gpio;
     uint32_t board_id;
     uint32_t keypad_id;
+    bool key_lock;
 } EverestStraps;
 
 /* Drive a strap value out over a run of consecutive GPIO input lines. */
@@ -259,6 +310,10 @@ static void everest_straps_reset(void *opaque)
 
     /* No SD card in the slot (active low detect, so drive it high). */
     qemu_set_irq(qdev_get_gpio_in(st->gpio, EVEREST_GPIO_SD_CARD_DETECT), 1);
+
+    /* Key lock switch: high means unlocked, which is what enables the keypad. */
+    qemu_set_irq(qdev_get_gpio_in(st->gpio, EVEREST_GPIO_KEY_LOCK),
+                 st->key_lock ? 0 : 1);
 }
 
 static void everest_init(MachineState *machine)
@@ -320,6 +375,7 @@ static void everest_init(MachineState *machine)
     straps->gpio = mpu->gpio;
     straps->board_id = ems->board_id;
     straps->keypad_id = ems->keypad_id;
+    straps->key_lock = ems->key_lock;
     qemu_register_reset(everest_straps_reset, straps);
     everest_straps_reset(straps);
 
@@ -377,6 +433,16 @@ static void everest_set_keypad_id(Object *obj, Visitor *v, const char *name,
     ems->keypad_id = value;
 }
 
+static bool everest_get_key_lock(Object *obj, Error **errp)
+{
+    return EVEREST_MACHINE(obj)->key_lock;
+}
+
+static void everest_set_key_lock(Object *obj, bool value, Error **errp)
+{
+    EVEREST_MACHINE(obj)->key_lock = value;
+}
+
 static void everest_machine_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -401,6 +467,11 @@ static void everest_machine_class_init(ObjectClass *oc, void *data)
                               NULL, NULL);
     object_class_property_set_description(oc, "keypad-id",
         "Keypad variant strap read from GPIO 107,108 and 96 (bit 2 unused)");
+
+    object_class_property_add_bool(oc, "key-lock",
+                                   everest_get_key_lock, everest_set_key_lock);
+    object_class_property_set_description(oc, "key-lock",
+        "Engage the key lock switch (GPIO 93), which disables the keypad");
 }
 
 static void everest_machine_instance_init(Object *obj)
