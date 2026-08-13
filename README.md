@@ -59,9 +59,19 @@ dependencies:
 
 ```bash
 sudo apt install git build-essential ninja-build pkg-config \
-    libglib2.0-dev libpixman-1-dev python3-venv flex bison \
-    libslirp-dev libasound2-dev libpulse-dev zlib1g-dev
+    libglib2.0-dev libpixman-1-dev python3-venv zlib1g-dev \
+    libpulse-dev libgtk-3-dev
 ```
+
+Two more are optional: `libasound2-dev` adds ALSA alongside PulseAudio, and
+`libsdl2-dev` gets you an SDL window instead of a GTK one. `setup.sh` probes
+for both and builds with whatever it finds, and `run.sh` picks a display
+backend the binary actually has, so their absence costs you an option rather
+than the build.
+
+QEMU 9.1 needs neither `flex`, `bison` nor `libslirp-dev` for this target:
+slirp is built from a bundled subproject, and the lexer and parser generators
+are not reached building `arm-softmmu`.
 
 You also need a firmware bundle — an `.lsi` file such as `2.2.53.lsi`. This
 repo does not redistribute one.
@@ -244,11 +254,12 @@ keypad's second keycode array, which is why `keypad-id` defaults to 1. Select
 no control at all.
 
 **Type into the QEMU window, not the terminal.** `run.sh` / `run.ps1` open an
-SDL window that stays black — the device has no screen, so the guest never
-initialises a framebuffer — but that window is what captures keystrokes and
-feeds them to the emulated keypad. The terminal you launched from is the
-device's *serial console* (a root shell), which is a different input path.
-Pass `-Display none` / `DISPLAY_BACKEND=none` for a headless run.
+SDL or GTK window (whichever the binary was built with) that stays black — the
+device has no screen, so the guest never initialises a framebuffer — but that
+window is what captures keystrokes and feeds them to the emulated keypad. The
+terminal you launched from is the device's *serial console* (a root shell),
+which is a different input path. Pass `-Display none` / `DISPLAY_BACKEND=none`
+for a headless run.
 
 **The key lock switch must be released or the keypad is dead** — that is real
 device behaviour, not an emulator quirk, and it silently drops every keypress.

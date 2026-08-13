@@ -28,7 +28,22 @@ case "$(uname -s)" in
         fi
         ;;
     *)
-        AUDIO_DRVS="${AUDIO_DRVS:-pa,alsa}"
+        # Name only the backends whose development headers are installed.
+        # configure treats an explicitly requested but unavailable driver as a
+        # hard error, so a fixed "pa,alsa" aborts meson setup on a machine
+        # without libasound2-dev. Letting configure autodetect instead is not
+        # the answer either: alsa is absent from QEMU's Linux default priority
+        # list, so "default" would drop it even where it is available.
+        if [ -z "${AUDIO_DRVS:-}" ]; then
+            AUDIO_DRVS=
+            for probe in pa:libpulse alsa:alsa; do
+                if pkg-config --exists "${probe#*:}" 2>/dev/null; then
+                    AUDIO_DRVS="${AUDIO_DRVS:+$AUDIO_DRVS,}${probe%%:*}"
+                fi
+            done
+            # Found nothing: let configure autodetect rather than fail outright.
+            AUDIO_DRVS="${AUDIO_DRVS:-default}"
+        fi
         EXE=
         ;;
 esac

@@ -30,7 +30,22 @@ AUDIO_DRV="${AUDIO_DRV:-$DEFAULT_AUDIO}"
 # The window this opens stays black -- the device has no screen -- but it is
 # what captures keystrokes for the emulated keypad. DISPLAY_BACKEND=none for a
 # headless run driven only from the serial console.
-DISPLAY_BACKEND="${DISPLAY_BACKEND:-sdl}"
+#
+# Prefer SDL, then GTK. A QEMU built without libsdl2-dev has no sdl display at
+# all and refuses to start, and for a window that is black by design either one
+# serves equally well -- so pick whichever this binary actually has rather than
+# making libsdl2-dev a requirement. "none" is always available, so this always
+# resolves.
+if [ -z "${DISPLAY_BACKEND:-}" ]; then
+    HAVE_DISPLAYS="$("$QEMU" -display help 2>/dev/null || true)"
+    for d in sdl gtk none; do
+        if printf '%s\n' "$HAVE_DISPLAYS" | grep -qx "$d"; then
+            DISPLAY_BACKEND="$d"
+            break
+        fi
+    done
+    DISPLAY_BACKEND="${DISPLAY_BACKEND:-none}"
+fi
 BOARD_ID="${BOARD_ID:-2}"
 # 1 selects the keycode array that has space, shift and control.
 KEYPAD_ID="${KEYPAD_ID:-1}"
